@@ -89,3 +89,50 @@ fn full_escrow_lifecycle_with_registry_and_correlation() {
     let settled = scenario.world().escrow.get_atomic_commit(&cid2);
     assert_eq!(settled.state, escrow::AtomicCommitState::Settled);
 }
+#[test]
+fn failed_multi_contract_operation_rolls_back_participating_state() {
+    let env = Environment::new();
+    let admin = env.address();
+    let platform_wallet = env.address();
+    let client = env.address();
+    let artist = env.address();
+
+    // Client has less than the requested escrow amount, so the token transfer
+    // (and the overall create_escrow transaction) must fail and roll back.
+    env.mint(&client, AMOUNT - 1);
+
+    let scenario = Scenario::begin(&env, &admin, &platform_wallet, FEE_BPS);
+    let world = scenario.finish();
+    let cid = Bytes::from_slice(&env.env, b"rollback-001");
+
+    let client_balance_before = env.balance(&client);
+    let escrow_balance_before = env.balance(&world.escrow_addr);
+
+    let result = world.escrow.try_create_escrow(
+        &cid,
+        &client,
+        &artist,
+        &AMOUNT,
+        &world.config_stub_addr,
+    );
+    assert!(result.is_err(), "create_escrow must fail when client balance is insufficient");
+
+    // Focused rollback assertions: escrow storage and participating token balances
+    // must all return to their pre-operation state.
+    a::assert_escrow_create_rolled_back(
+        &env,
+        &world.escrow,
+        &world.escrow_addr,
+        &cid,
+        &client,
+        client_balance_before,
+        escrow_balance_before,
+    );
+    a::assert_balances_unchanged(
+        &env,
+        &[
+            (&platform_wallet, 0),
+            (&artist, 0),
+        ],
+    );
+}
