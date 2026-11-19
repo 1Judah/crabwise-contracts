@@ -58,6 +58,7 @@ struct Fixture<'a> {
     env: Env,
     escrow: EscrowContractClient<'a>,
     escrow_addr: Address,
+    admin: Address,
     commission: Address,
     config: Address,
     usdc: Address,
@@ -94,6 +95,7 @@ fn setup<'a>() -> Fixture<'a> {
 
     Fixture {
         escrow_addr,
+        admin,
         commission_id: Bytes::from_slice(&env, b"comm-001"),
         env,
         escrow,
@@ -506,4 +508,144 @@ fn atomic_commit_key_has_a_nonzero_ttl_after_access() {
         .env
         .as_contract(&f.escrow_addr, || f.env.storage().persistent().get_ttl(&key));
     assert!(ttl_after_read > 0);
+}
+
+// ── pause authorization transitions ────────────────────────────────────────
+
+#[test]
+fn pause_and_unpause_reject_before_initialize() {
+    let f = setup();
+
+    assert_eq!(
+        f.escrow.try_pause(&f.admin),
+        Err(Ok(EscrowError::Unauthorized))
+    );
+    assert!(!f.escrow.is_paused());
+
+    assert_eq!(
+        f.escrow.try_unpause(&f.admin),
+        Err(Ok(EscrowError::Unauthorized))
+    );
+    assert!(!f.escrow.is_paused());
+}
+
+#[test]
+fn unauthorized_pause_and_unpause_are_rejected_without_side_effects() {
+    use soroban_sdk::testutils::Events as _;
+
+    let f = setup();
+    let intruder = Address::generate(&f.env);
+    f.escrow.initialize(&f.admin);
+
+    let events_before = f.env.events().all().len();
+    for caller in [&intruder, &f.client, &f.artist] {
+        assert_eq!(
+            f.escrow.try_pause(caller),
+            Err(Ok(EscrowError::Unauthorized))
+        );
+    }
+    assert!(!f.escrow.is_paused());
+    assert_eq!(
+        f.env.events().all().len(),
+        events_before,
+        "rejected pause attempts must not emit events"
+    );
+
+    // Authorized admin pauses cleanly.
+    f.escrow.pause(&f.admin);
+    assert!(f.escrow.is_paused());
+
+    let events_while_paused = f.env.events().all().len();
+    for caller in [&intruder, &f.client, &f.artist] {
+        assert_eq!(
+            f.escrow.try_unpause(caller),
+            Err(Ok(EscrowError::Unauthorized))
+        );
+    }
+    assert!(f.escrow.is_paused());
+    assert_eq!(
+        f.env.events().all().len(),
+        events_while_paused,
+        "rejected unpause attempts must not emit events"
+    );
+
+    // Authorized admin resumes cleanly.
+    f.escrow.unpause(&f.admin);
+    assert!(!f.escrow.is_paused());
+}
+
+#[test]
+fn authorized_pause_blocks_escrow_until_admin_unpauses_for_atomic_flow() {
+    let f = setup();
+    let intruder = Address::generate(&f.env);
+    f.escrow.initialize(&f.admin);
+
+    f.escrow.pause(&f.admin);
+    assert_eq!(
+        f.escrow.try_create_escrow(
+            &f.commission_id,
+            &f.client,
+            &f.artist,
+            &AMOUNT,
+            &f.config,
+        ),
+        Err(Ok(EscrowError::ContractPaused))
+    );
+
+    // Unauthorized unpause does not unblock escrow creation.
+    assert_eq!(
+        f.escrow.try_unpause(&intruder),
+        Err(Ok(EscrowError::Unauthorized))
+    );
+    assert_eq!(
+        f.escrow.try_create_escrow(
+            &f.commission_id,
+            &f.client,
+            &f.artist,
+            &AMOUNT,
+            &f.config,
+        ),
+        Err(Ok(EscrowError::ContractPaused))
+    );
+
+    // Authorized unpause restores creation and allows the atomic commit flow.
+    f.escrow.unpause(&f.admin);
+    fund_escrow(&f);
+    f.escrow.begin_atomic_commit(&f.commission_id);
+    f.escrow.confirm_atomic_step(&f.commission_id, &f.client);
+    f.escrow.confirm_atomic_step(&f.commission_id, &f.artist);
+    let marker = f.escrow.finalize_atomic_commit(&f.commission_id);
+    assert_eq!(marker.state, AtomicCommitState::Settled);
+}
+
+#[test]
+fn pause_authorization_follows_completed_admin_rotation() {
+    let f = setup();
+    let successor = Address::generate(&f.env);
+    f.escrow.initialize(&f.admin);
+
+    // Proposed successor has no pause authority prior to acceptance.
+    f.escrow.transfer_admin(&f.admin, &successor);
+    assert_eq!(
+        f.escrow.try_pause(&successor),
+        Err(Ok(EscrowError::Unauthorized))
+    );
+    assert!(!f.escrow.is_paused());
+
+    // After acceptance, authority moves from the former admin to the successor.
+    f.escrow.accept_admin(&successor);
+    assert_eq!(
+        f.escrow.try_pause(&f.admin),
+        Err(Ok(EscrowError::Unauthorized))
+    );
+
+    f.escrow.pause(&successor);
+    assert!(f.escrow.is_paused());
+    assert_eq!(
+        f.escrow.try_unpause(&f.admin),
+        Err(Ok(EscrowError::Unauthorized))
+    );
+
+    f.escrow.unpause(&successor);
+    assert!(!f.escrow.is_paused());
 }
