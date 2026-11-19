@@ -9,3 +9,4 @@ soroban-sdk = { version = "21.0.0", features = ["testutils"] }
 escrow = { path = "../../contracts/escrow", features = ["testutils"], version = "0.1.0" }
 platform_config = { path = "../../contracts/platform_config", features = ["testutils"], version = "0.1.0" }
 shared = { path = "../../contracts/shared", version = "0.1.0" }
+campaign_factory = { path = "../../contracts/factory", features = ["testutils"] }
