@@ -1,4 +1,4 @@
-//! Contract semantic versioning (closes #682).
+﻿//! Contract semantic versioning (closes #682).
 //!
 //! Every Lumora contract exposes the same version query surface:
 //!
@@ -16,6 +16,7 @@
 
 use soroban_sdk::{contracttype, Env, String};
 
+use crate::errors::VersionParseError;
 use crate::upgrade::{ContractVersion, UpgradeKey};
 
 /// Storage-schema generation. Bump this when a `#[contracttype]` layout
@@ -82,28 +83,82 @@ impl ContractVersion {
     }
 }
 
-/// Parse a `"MAJOR.MINOR.PATCH"` string (optional `-prerelease` suffix ignored).
-pub fn parse_semver(raw: &str) -> ContractVersion {
+/// Parse a `"MAJOR.MINOR.PATCH"` string strictly.
+///
+/// Accepted forms: `MAJOR`, `MAJOR.MINOR`, `MAJOR.MINOR.PATCH`, with an
+/// optional prerelease/build suffix after the parsed numeric components
+/// (for example `1.2.3-alpha.1` or `1.2.3+build`). Malformed inputs are
+/// rejected explicitly instead of being coerced to a default/compatible value.
+pub fn try_parse_semver(raw: &str) -> Result<ContractVersion, VersionParseError> {
+    if raw.is_empty() {
+        return Err(VersionParseError::InvalidFormat);
+    }
+
+    let bytes = raw.as_bytes();
     let mut nums = [0u32; 3];
     let mut idx = 0usize;
-    let mut acc = 0u32;
-    for &b in raw.as_bytes() {
-        if b == b'.' {
-            if idx < 3 {
-                nums[idx] = acc;
-                idx += 1;
-                acc = 0;
-            }
-        } else if b.is_ascii_digit() {
-            acc = acc.saturating_mul(10).saturating_add((b - b'0') as u32);
-        } else {
+    let mut i = 0usize;
+
+    while idx < 3 {
+        if i >= bytes.len() || !bytes[i].is_ascii_digit() {
+            return Err(VersionParseError::InvalidFormat);
+        }
+
+        let mut acc = 0u32;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            acc = acc
+                .saturating_mul(10)
+                .saturating_add((bytes[i] - b'0') as u32);
+            i += 1;
+        }
+        nums[idx] = acc;
+        idx += 1;
+
+        if idx == 3 {
             break;
         }
+
+        if i >= bytes.len() {
+            // Partial versions like "1" or "1.2" are accepted.
+            break;
+        }
+
+        match bytes[i] {
+            b'.' => {
+                i += 1;
+                // Trailing dot (e.g. "1.") is malformed.
+                if i >= bytes.len() {
+                    return Err(VersionParseError::InvalidFormat);
+                }
+                // Next component must start numerically unless it is the end,
+                // which is already rejected above.
+                if !bytes[i].is_ascii_digit() {
+                    return Err(VersionParseError::InvalidFormat);
+                }
+            }
+            b'-' | b'+' => {
+                // Prerelease/build suffix allowed after a completed component.
+                break;
+            }
+            _ => return Err(VersionParseError::InvalidFormat),
+        }
     }
-    if idx < 3 {
-        nums[idx] = acc;
+
+    if idx == 3 && i < bytes.len() {
+        match bytes[i] {
+            b'-' | b'+' => {}
+            _ => return Err(VersionParseError::InvalidFormat),
+        }
     }
-    ContractVersion::new(nums[0], nums[1], nums[2])
+
+    Ok(ContractVersion::new(nums[0], nums[1], nums[2]))
+}
+
+/// Parse a `"MAJOR.MINOR.PATCH"` string (optional `-prerelease` suffix ignored).
+///
+/// Rejects malformed semantic-version inputs explicitly.
+pub fn parse_semver(raw: &str) -> ContractVersion {
+    try_parse_semver(raw).expect("malformed semantic version")
 }
 
 /// Lowest client version that is still compatible with `current`.
@@ -270,5 +325,26 @@ mod tests {
             ContractVersion::new(1, 2, 3).cmp_semver(&ContractVersion::new(1, 2, 3)),
             Ordering::Equal
         );
+    }
+    #[test]
+    fn parse_semver_rejects_malformed_input() {
+        assert!(try_parse_semver("").is_err());
+        assert!(try_parse_semver("abc").is_err());
+        assert!(try_parse_semver("1..2").is_err());
+        assert!(try_parse_semver("1.2.x").is_err());
+        assert!(try_parse_semver(".1.2").is_err());
+        assert!(try_parse_semver("1.").is_err());
+        assert!(try_parse_semver("-1.0.0").is_err());
+        assert!(try_parse_semver("1.2.3.4").is_err());
+        assert_eq!(
+            try_parse_semver("v1.2.3"),
+            Err(VersionParseError::InvalidFormat)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "malformed semantic version")]
+    fn parse_semver_panics_on_malformed_input() {
+        let _ = parse_semver("not-a-version");
     }
 }

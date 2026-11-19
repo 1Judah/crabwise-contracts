@@ -20,6 +20,19 @@
 
 use soroban_sdk::{contracterror, symbol_short, Symbol};
 
+/// Stable error for semantic-version parsing failures.
+///
+/// Malformed version inputs must be rejected explicitly instead of being
+/// silently coerced into a compatible-looking version.
+#[contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum VersionParseError {
+    /// Version string is empty, missing a numeric major component, or contains
+    /// malformed/invalid characters for a semantic version.
+    InvalidFormat = 1,
+}
+
 // ── General errors (1–99) ────────────────────────────────────────────────────
 
 /// Unified error codes that are meaningful across multiple contracts.
