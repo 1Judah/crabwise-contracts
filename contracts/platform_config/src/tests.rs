@@ -23,6 +23,14 @@ fn test_set_fee_bps_success() {
 }
 
 #[test]
+fn test_set_fee_bps_accepts_maximum() {
+    let env = Env::default();
+    let (client, _, _, _) = setup(&env);
+    client.set_fee_bps(&1000);
+    assert_eq!(client.get_config().fee_bps, 1000);
+}
+
+#[test]
 fn test_initialize_success() {
     let env = Env::default();
     env.mock_all_auths();
@@ -38,11 +46,16 @@ fn test_initialize_success() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #4)")]
-fn test_set_fee_bps_too_high() {
+fn test_set_fee_bps_rejects_above_maximum_without_changing_fee() {
     let env = Env::default();
     let (client, _, _, _) = setup(&env);
-    client.set_fee_bps(&1001);
+    let err = client
+        .try_set_fee_bps(&1001)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, crate::ConfigError::InvalidFeeBps);
+    assert_eq!(client.get_config().fee_bps, 500);
 }
 
 #[test]
