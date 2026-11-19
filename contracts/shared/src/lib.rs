@@ -25,6 +25,7 @@ pub use rollout::{
     flag_cap, set_flag_cap, RolloutError, RolloutPhase, RolloutState, MAX_FEATURE_FLAGS,
 };
 pub use admin::{
+    accept, accept_and_rotate, cancel, is_pending_admin, pending_admin, propose, require_active_admin,
     AdminError, AdminKey, AdminRotatedEvent, AdminTransferCancelledEvent,
     AdminTransferProposedEvent,
 };
