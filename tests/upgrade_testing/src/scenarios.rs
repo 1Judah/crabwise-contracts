@@ -150,3 +150,32 @@ fn regression_suite_runs_after_upgrade() {
     assert!(report.all_passed, "regression battery must pass");
     assert!(verify(&report));
 }
+
+/// Loads representative prior-version state and verifies it remains readable
+/// after an upgrade and migration.
+#[test]
+fn representative_prior_version_state_remains_readable_after_upgrade() {
+    let sim = UpgradeSimulator::new();
+    sim.env.mock_all_auths();
+    let admin = Address::generate(&sim.env);
+    let v1 = sim.deploy_v1();
+    V1Client::new(&sim.env, &v1).initialize(&admin);
+    let (ids, expected) = seed_v1(&sim, &v1, &admin, 3);
+
+    let v2 = sim.upgrade_in_place(v1, &ids, migrate_SchemaCompatible);
+    let client = V2Client::new(&sim.env, &v2);
+    for rid in &ids {
+        assert_eq!(client.migrate(&admin, rid), true);
+    }
+
+    crate::regression::assert_representative_prior_state_preserved(
+        &sim.env,
+        &v2,
+        &admin,
+        &ids,
+        &expected,
+    );
+
+    let report = regression_suite(&sim.env, v2, &admin, &ids, &expected);
+    assert!(verify(&report), "upgrade compatibility regression must hold");
+}

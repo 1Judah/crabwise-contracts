@@ -87,3 +87,42 @@ pub fn regression_suite(
 pub fn verify(report: &RegressionReport) -> bool {
     report.all_passed
 }
+
+/// Asserts that representative prior-version state loaded before an upgrade
+/// remains readable and consistent after the upgrade.
+///
+/// Representative state includes admin authority, storage schema/version
+/// surfaces, and every roster/member record that existed on the prior version.
+pub fn assert_representative_prior_state_preserved(
+    env: &Env,
+    contract: &Address,
+    admin: &Address,
+    roster_ids: &[Bytes],
+    expected_members: &[(Bytes, Address)],
+) {
+    let client = V2Client::new(env, contract);
+
+    assert_eq!(client.admin(), *admin, "admin must be preserved across upgrade");
+    assert_eq!(client.version(), (2, 0, 0), "upgraded version must be readable");
+    assert_eq!(client.storage_schema(), 2, "storage schema must be readable");
+
+    for rid in roster_ids {
+        let roster = client
+            .get_roster(rid)
+            .expect("representative prior-version roster must remain readable");
+        assert!(
+            !roster.is_empty(),
+            "representative roster membership must be preserved"
+        );
+    }
+
+    for (rid, member) in expected_members {
+        let roster = client
+            .get_roster(rid)
+            .expect("roster for representative member must remain readable");
+        assert!(
+            roster.contains(member),
+            "representative prior-version member must remain in roster"
+        );
+    }
+}
