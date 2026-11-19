@@ -397,6 +397,62 @@ fn atomic_migration_rejects_missing_escrow() {
     assert_eq!(err, EscrowError::NotFound);
 }
 
+#[test]
+fn failed_inbound_transfer_leaves_no_escrow_state() {
+    let f = setup();
+    token::StellarAssetClient::new(&f.env, &f.usdc).burn(&f.client, &1_000_000);
+
+    assert!(f
+        .escrow
+        .try_create_escrow(
+            &f.commission_id,
+            &f.client,
+            &f.artist,
+            &AMOUNT,
+            &f.config,
+        )
+        .is_err());
+
+    assert!(f.escrow.try_get_escrow(&f.commission_id).is_err());
+    assert_eq!(
+        token::Client::new(&f.env, &f.usdc).balance(&f.escrow_addr),
+        0
+    );
+}
+
+#[test]
+fn failed_outbound_transfer_rolls_back_state_and_prior_transfer() {
+    let f = setup();
+    fund_escrow(&f);
+    let token_admin = token::StellarAssetClient::new(&f.env, &f.usdc);
+    token_admin.burn(&f.escrow_addr, &1);
+
+    let escrow_balance_before = token::Client::new(&f.env, &f.usdc).balance(&f.escrow_addr);
+    assert_eq!(escrow_balance_before, AMOUNT - 1);
+
+    // The artist payout succeeds first, but the subsequent fee transfer fails
+    // because one token was removed. The enclosing invocation must revert both.
+    assert!(f
+        .escrow
+        .try_release_payment(&f.commission_id, &f.config)
+        .is_err());
+
+    let record = f.escrow.get_escrow(&f.commission_id);
+    assert_eq!(record.status, CommissionStatus::Locked);
+    assert_eq!(
+        token::Client::new(&f.env, &f.usdc).balance(&f.escrow_addr),
+        escrow_balance_before
+    );
+    assert_eq!(
+        token::Client::new(&f.env, &f.usdc).balance(&f.artist),
+        0
+    );
+    assert_eq!(
+        token::Client::new(&f.env, &f.usdc).balance(&f.platform_wallet),
+        0
+    );
+}
+
 // ── marker serialization round-trip (#656) ─────────────────────────────────
 
 #[test]
