@@ -183,3 +183,42 @@ fn factory_rejects_invalid_deployment_inputs_before_creating_child() {
     );
     assert_eq!(env.env.events().all().len(), before, "deployment failure must not emit success event");
 }
+
+#[test]
+fn factory_registration_is_atomic_on_failed_deployment() {
+    let env = Environment::new();
+    let admin = env.address();
+    let treasury = env.address();
+    let creator = env.address();
+    let salt = BytesN::from_array(&env.env, [5u8; 32]);
+
+    let factory_id = env.env.register_contract(None, CampaignFactoryContract);
+    let factory = CampaignFactoryContractClient::new(&env.env, &factory_id);
+    factory.initialize(&admin, &treasury);
+
+    // Configure an unavailable/unsupported wasm hash so child deployment fails.
+    let missing_wasm_hash = BytesN::from_array(&env.env, [42u8; 32]);
+    factory.update_wasm_hash(&admin, &missing_wasm_hash);
+
+    let events_before = env.env.events().all().len();
+    let result = factory.try_deploy_campaign(&creator, &env.usdc, &salt);
+    assert!(result.is_err(), "deployment with unavailable wasm must fail");
+
+    // Registry state and success event must only be committed on successful deploy.
+    assert!(
+        factory.get_deployed_campaign(&salt).is_none(),
+        "failed deployment must not leave a registered address"
+    );
+    assert_eq!(
+        env.env.events().all().len(),
+        events_before,
+        "failed deployment must not emit a success event"
+    );
+
+    // A second attempt with the same validated inputs also fails without leaving
+    // partial registry/event state behind.
+    let result_retry = factory.try_deploy_campaign(&creator, &env.usdc, &salt);
+    assert!(result_retry.is_err());
+    assert!(factory.get_deployed_campaign(&salt).is_none());
+    assert_eq!(env.env.events().all().len(), events_before);
+}
