@@ -89,3 +89,28 @@ fn full_escrow_lifecycle_with_registry_and_correlation() {
     let settled = scenario.world().escrow.get_atomic_commit(&cid2);
     assert_eq!(settled.state, escrow::AtomicCommitState::Settled);
 }
+#[test]
+fn rejected_config_updates_preserve_existing_state() {
+    let env = Environment::new();
+    let admin = env.address();
+    let platform_wallet = env.address();
+
+    // Initialize config with a known-good fee.
+    let scenario = Scenario::begin(&env, &admin, &platform_wallet, FEE_BPS);
+    let cfg = scenario.finish();
+    let before = cfg.config.get_config();
+    assert_eq!(before.fee_bps, FEE_BPS);
+
+    // Invalid fee update is rejected at the boundary and leaves config unchanged.
+    let invalid = cfg.config.try_set_fee_bps(&1001);
+    assert!(invalid.is_err(), "fee bps above the allowed range must be rejected");
+    let after = cfg.config.get_config();
+    assert_eq!(after.fee_bps, before.fee_bps);
+    assert_eq!(after.admin, before.admin);
+    assert_eq!(after.platform_wallet, before.platform_wallet);
+    assert_eq!(after.usdc_token, before.usdc_token);
+
+    // A valid update after rejection proves configuration remains usable.
+    cfg.config.set_fee_bps(&250);
+    assert_eq!(cfg.config.get_config().fee_bps, 250);
+}
