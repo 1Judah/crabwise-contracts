@@ -382,3 +382,36 @@ fn invalid_fee_configs_are_rejected() {
         crate::errors::ConfigError::InvalidReferralBps
     );
 }
+
+#[test]
+fn fee_split_rounding_conserves_uneven_amounts() {
+    let env = Env::default();
+    let (client, admin, referrer, _) = setup(&env);
+
+    // Uneven fee: 10_001 * 333 / 10_000 = 333 (floored), payout gets remainder.
+    let b = client.compute_fees(&10_001, &0, &None);
+    assert_eq!(b.fee, 333);
+    assert_eq!(b.payout + b.fee, b.amount);
+    assert_eq!(b.platform_fee + b.referral_fee, b.fee);
+    assert_eq!(b.payout + b.platform_fee + b.referral_fee, b.amount);
+
+    // Referral split with uneven division: fee 333, 3333 bps of fee floors to 111,
+    // platform receives deterministic remainder 222.
+    client.set_referral_config(&admin, &ReferralConfig { bps: 3333 });
+    let b = client.compute_fees(&10_001, &0, &Some(referrer.clone()));
+    assert_eq!(b.fee, 333);
+    assert_eq!(b.referral_fee, 111);
+    assert_eq!(b.platform_fee, 222);
+    assert_eq!(b.platform_fee + b.referral_fee, b.fee);
+    assert_eq!(b.payout + b.platform_fee + b.referral_fee, b.amount);
+
+    // Additional uneven cases conserve all amounts.
+    for amount in [1_i128, 3, 7, 999, 10_003, 99_999] {
+        let b = client.compute_fees(&amount, &0, &Some(referrer.clone()));
+        assert!(b.fee >= 0 && b.payout >= 0);
+        assert!(b.referral_fee >= 0 && b.platform_fee >= 0);
+        assert_eq!(b.platform_fee + b.referral_fee, b.fee);
+        assert_eq!(b.payout + b.fee, b.amount);
+        assert_eq!(b.payout + b.platform_fee + b.referral_fee, b.amount);
+    }
+}
