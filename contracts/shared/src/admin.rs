@@ -125,10 +125,36 @@ pub fn pending_admin(env: &Env) -> Option<Address> {
     env.storage().instance().get(&AdminKey::PendingAdmin)
 }
 
+/// `true` when `candidate` is the currently proposed successor awaiting
+/// acceptance.
+///
+/// Being pending grants no active admin authority; the address only becomes
+/// active once it completes [`accept`].
+pub fn is_pending_admin(env: &Env, candidate: &Address) -> bool {
+    pending_admin(env).as_ref() == Some(candidate)
+}
+
+/// Enforce that `caller` is the **active** admin and has authorized the call.
+///
+/// A proposed successor stored under [`AdminKey::PendingAdmin`] is deliberately
+/// not accepted here: until [`accept`] runs, only `active_admin` holds
+/// authority.
+pub fn require_active_admin(active_admin: &Address, caller: &Address) -> Result<(), AdminError> {
+    if caller != active_admin {
+        return Err(AdminError::Unauthorized);
+    }
+    caller.require_auth();
+    Ok(())
+}
+
 /// Step 1 — `current_admin` proposes `new_admin` as its successor.
 ///
-/// Does not change the active admin. The caller's wrapper is responsible for
-/// checking `current_admin` against its stored admin before calling this.
+/// Does not change the active admin: `new_admin` gains no authority until it
+/// calls [`accept`], and any prior unaccepted proposal is replaced. If
+/// `current_admin == new_admin`, the call fails with
+/// [`AdminError::InvalidTarget`] without disturbing an existing pending
+/// proposal. The caller's wrapper is responsible for checking `current_admin`
+/// against its stored active admin before calling this.
 pub fn propose(
     env: &Env,
     current_admin: &Address,
@@ -153,16 +179,20 @@ pub fn propose(
 
 /// Step 2 — the pending successor accepts and completes the rotation.
 ///
-/// Only `new_admin`'s own signature can complete the handover; the contract
-/// wrapper installs it as the active admin after this returns. `previous_admin`
-/// is what the contract currently has stored, and is carried only so the
-/// rotation event can name both parties.
+/// Only `new_admin`'s own signature can complete the handover; neither the
+/// current active admin nor any third party can accept on its behalf. A
+/// rejected call leaves [`AdminKey::PendingAdmin`] intact and emits no
+/// rotation event. The contract wrapper installs `new_admin` as the active
+/// admin only after this returns `Ok(())`.
+///
+/// `previous_admin` is what the contract currently has stored as active admin;
+/// it must differ from `new_admin` so a self-rotation cannot be recorded as a
+/// handover.
 pub fn accept(
     env: &Env,
     previous_admin: &Address,
     new_admin: &Address,
 ) -> Result<(), AdminError> {
-    new_admin.require_auth();
     let pending: Address = env
         .storage()
         .instance()
@@ -171,6 +201,10 @@ pub fn accept(
     if pending != *new_admin {
         return Err(AdminError::Unauthorized);
     }
+    if previous_admin == new_admin {
+        return Err(AdminError::InvalidTarget);
+    }
+    new_admin.require_auth();
     env.storage().instance().remove(&AdminKey::PendingAdmin);
     env.events().publish(
         (symbol_short!("adm_rot"),),
@@ -182,15 +216,26 @@ pub fn accept(
     Ok(())
 }
 
+/// Convenience wrapper around [`accept`] that returns the newly active admin
+/// address once the handover succeeds.
+pub fn accept_and_rotate(
+    env: &Env,
+    previous_admin: &Address,
+    new_admin: &Address,
+) -> Result<Address, AdminError> {
+    accept(env, previous_admin, new_admin)?;
+    Ok(new_admin.clone())
+}
+
 /// Withdraw an in-flight proposal without completing it; the active admin is
 /// left untouched.
 ///
 /// The contract wrapper checks the caller against its stored admin first.
 pub fn cancel(env: &Env, admin: &Address) -> Result<(), AdminError> {
-    admin.require_auth();
     if !env.storage().instance().has(&AdminKey::PendingAdmin) {
         return Err(AdminError::NoPendingTransfer);
     }
+    admin.require_auth();
     env.storage().instance().remove(&AdminKey::PendingAdmin);
     env.events().publish(
         (symbol_short!("adm_cncl"),),
@@ -333,5 +378,162 @@ mod tests {
         assert_eq!(AdminError::Unauthorized as u32, 2);
         assert_eq!(AdminError::NoPendingTransfer as u32, 3);
         assert_eq!(AdminError::InvalidTarget as u32, 4);
+    }
+
+    #[test]
+    fn proposed_admin_lacks_active_authority_until_accept() {
+        let (env, mut active_admin) = funded_env();
+        let contract_id = env.register_contract(None, crate::TestContract);
+        let original_admin = active_admin.clone();
+        let successor = Address::generate(&env);
+        let bystander = Address::generate(&env);
+
+        on(&env, &contract_id, || {
+            propose(&env, &active_admin, &successor).unwrap()
+        });
+        assert!(on(&env, &contract_id, || is_pending_admin(&env, &successor)));
+        assert!(!on(&env, &contract_id, || is_pending_admin(
+            &env,
+            &original_admin
+        )));
+
+        // While the transfer is pending, only the current active admin passes
+        // active-admin authorization; the proposed successor is rejected.
+        assert_eq!(
+            on(&env, &contract_id, || require_active_admin(
+                &active_admin,
+                &successor
+            )),
+            Err(AdminError::Unauthorized)
+        );
+        assert!(on(&env, &contract_id, || require_active_admin(
+            &active_admin,
+            &original_admin
+        ))
+        .is_ok());
+
+        // Non-recipients (both a bystander and the active admin) cannot accept.
+        assert_eq!(
+            on(&env, &contract_id, || accept(&env, &active_admin, &bystander)),
+            Err(AdminError::Unauthorized)
+        );
+        assert_eq!(
+            on(&env, &contract_id, || accept(
+                &env,
+                &active_admin,
+                &original_admin
+            )),
+            Err(AdminError::Unauthorized)
+        );
+        assert_eq!(
+            on(&env, &contract_id, || pending_admin(&env)),
+            Some(successor.clone())
+        );
+
+        // Once the proposed successor accepts, active authority transfers.
+        active_admin = on(&env, &contract_id, || {
+            accept_and_rotate(&env, &active_admin, &successor).unwrap()
+        });
+        assert_eq!(active_admin, successor);
+        assert_eq!(on(&env, &contract_id, || pending_admin(&env)), None);
+        assert!(!on(&env, &contract_id, || is_pending_admin(&env, &successor)));
+
+        assert_eq!(
+            on(&env, &contract_id, || require_active_admin(
+                &active_admin,
+                &original_admin
+            )),
+            Err(AdminError::Unauthorized)
+        );
+        assert!(on(&env, &contract_id, || require_active_admin(
+            &active_admin,
+            &successor
+        ))
+        .is_ok());
+    }
+
+    #[test]
+    fn replacing_unaccepted_proposal_revokes_previous_candidate() {
+        let (env, admin) = funded_env();
+        let contract_id = env.register_contract(None, crate::TestContract);
+        let first_candidate = Address::generate(&env);
+        let second_candidate = Address::generate(&env);
+
+        on(&env, &contract_id, || {
+            propose(&env, &admin, &first_candidate).unwrap()
+        });
+        on(&env, &contract_id, || {
+            propose(&env, &admin, &second_candidate).unwrap()
+        });
+
+        assert_eq!(
+            on(&env, &contract_id, || accept(&env, &admin, &first_candidate)),
+            Err(AdminError::Unauthorized)
+        );
+        assert_eq!(
+            on(&env, &contract_id, || pending_admin(&env)),
+            Some(second_candidate.clone())
+        );
+
+        on(&env, &contract_id, || {
+            accept(&env, &admin, &second_candidate).unwrap()
+        });
+        assert_eq!(on(&env, &contract_id, || pending_admin(&env)), None);
+    }
+
+    #[test]
+    fn failed_propose_to_self_preserves_existing_pending_admin() {
+        let (env, admin) = funded_env();
+        let contract_id = env.register_contract(None, crate::TestContract);
+        let successor = Address::generate(&env);
+
+        on(&env, &contract_id, || {
+            propose(&env, &admin, &successor).unwrap()
+        });
+        assert_eq!(
+            on(&env, &contract_id, || propose(&env, &admin, &admin)),
+            Err(AdminError::InvalidTarget)
+        );
+        assert_eq!(
+            on(&env, &contract_id, || pending_admin(&env)),
+            Some(successor)
+        );
+    }
+
+    #[test]
+    fn accept_rejects_degenerate_self_rotation_without_clearing_pending() {
+        let (env, admin) = funded_env();
+        let contract_id = env.register_contract(None, crate::TestContract);
+        let successor = Address::generate(&env);
+
+        on(&env, &contract_id, || {
+            propose(&env, &admin, &successor).unwrap()
+        });
+        assert_eq!(
+            on(&env, &contract_id, || accept(&env, &successor, &successor)),
+            Err(AdminError::InvalidTarget)
+        );
+        assert_eq!(
+            on(&env, &contract_id, || pending_admin(&env)),
+            Some(successor)
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn accept_enforces_successor_signature_when_auth_is_not_mocked() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, crate::TestContract);
+        let admin = Address::generate(&env);
+        let successor = Address::generate(&env);
+
+        on(&env, &contract_id, || {
+            env.storage()
+                .instance()
+                .set(&AdminKey::PendingAdmin, &successor);
+        });
+
+        // Without authorization from `successor`, host auth must reject `accept`.
+        let _ = on(&env, &contract_id, || accept(&env, &admin, &successor));
     }
 }

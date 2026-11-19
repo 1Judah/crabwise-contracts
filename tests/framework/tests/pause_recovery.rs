@@ -13,7 +13,10 @@
 //!   3. a non-admin address can neither pause nor unpause, and a rejected call
 //!      has no side effect;
 //!   4. `("esc", "paused")` and `("esc", "unpaused")` are emitted, and only by
-//!      the action that is supposed to emit them.
+//!      the action that is supposed to emit them;
+//!   5. delayed two-step admin handover: a proposed admin cannot exercise
+//!      admin authority before accepting, non-recipients cannot accept, and
+//!      acceptance transfers active admin authority to the successor.
 //!
 //! What they deliberately do NOT cover, and why:
 //!
@@ -210,4 +213,162 @@ fn pause_and_unpause_each_emit_their_own_event() {
         &world.escrow_addr,
         &[symbol_short!("esc"), symbol_short!("unpaused")],
     );
+}
+
+#[test]
+fn delayed_admin_acceptance_withholds_authority_until_accept() {
+    let env = Environment::new();
+    let admin = env.address();
+    let successor = env.address();
+    let non_recipient = env.address();
+    let platform_wallet = env.address();
+    let client = env.address();
+    let artist = env.address();
+    env.mint(&client, 1_000_000);
+
+    let world = World::deploy(&env, &admin, &platform_wallet, FEE_BPS);
+    world.escrow.initialize(&admin);
+
+    // Step 1: active admin proposes a successor.
+    world.escrow.transfer_admin(&admin, &successor);
+    assert_eq!(
+        world.escrow.get_pending_admin(),
+        Some(successor.clone()),
+        "proposed successor must be recorded as pending",
+    );
+    a::assert_event_emitted(
+        &env,
+        &world.escrow_addr,
+        &[symbol_short!("esc"), symbol_short!("adm_prop")],
+    );
+
+    // Before acceptance, the proposed successor cannot exercise any admin authority.
+    assert_eq!(
+        world.escrow.try_pause(&successor),
+        Err(Ok(EscrowError::Unauthorized)),
+        "proposed admin must not be able to pause before accepting",
+    );
+    assert!(
+        !world.escrow.is_paused(),
+        "rejected pause by pending admin must leave contract unpaused",
+    );
+    assert_eq!(
+        world.escrow.try_transfer_admin(&successor, &non_recipient),
+        Err(Ok(EscrowError::Unauthorized)),
+        "proposed admin must not be able to re-propose before accepting",
+    );
+    assert_eq!(
+        world.escrow.get_pending_admin(),
+        Some(successor.clone()),
+        "failed re-proposal must preserve the pending successor",
+    );
+
+    // The original admin remains active while acceptance is delayed.
+    world.escrow.pause(&admin);
+    assert!(world.escrow.is_paused());
+    assert_eq!(
+        world.escrow.try_unpause(&successor),
+        Err(Ok(EscrowError::Unauthorized)),
+        "proposed admin must not be able to unpause before accepting",
+    );
+    assert!(world.escrow.is_paused());
+
+    // Non-recipients — including the active admin itself — cannot accept on
+    // the successor's behalf, and rejections leave the pending proposal intact.
+    assert_eq!(
+        world.escrow.try_accept_admin(&non_recipient),
+        Err(Ok(EscrowError::Unauthorized)),
+        "non-recipient must be rejected by accept_admin",
+    );
+    assert_eq!(
+        world.escrow.try_accept_admin(&admin),
+        Err(Ok(EscrowError::Unauthorized)),
+        "active admin must not be able to force-accept on successor's behalf",
+    );
+    assert_eq!(
+        world.escrow.get_pending_admin(),
+        Some(successor.clone()),
+        "rejected acceptance attempts must not clear pending admin",
+    );
+
+    // Step 2: the proposed successor accepts and becomes the active admin.
+    world.escrow.accept_admin(&successor);
+    assert_eq!(
+        world.escrow.get_pending_admin(),
+        None,
+        "accept_admin must clear the pending admin slot",
+    );
+    a::assert_event_emitted(
+        &env,
+        &world.escrow_addr,
+        &[symbol_short!("esc"), symbol_short!("adm_rot")],
+    );
+
+    // Replaying acceptance fails once the handover has completed.
+    assert_eq!(
+        world.escrow.try_accept_admin(&successor),
+        Err(Ok(EscrowError::Unauthorized)),
+    );
+
+    // Authority is now revoked from the previous admin.
+    assert_eq!(
+        world.escrow.try_unpause(&admin),
+        Err(Ok(EscrowError::Unauthorized)),
+        "former admin must lose unpause authority after acceptance",
+    );
+    assert_eq!(
+        world.escrow.try_transfer_admin(&admin, &non_recipient),
+        Err(Ok(EscrowError::Unauthorized)),
+        "former admin must lose transfer authority after acceptance",
+    );
+    assert!(world.escrow.is_paused());
+
+    // The accepted successor now holds active admin authority.
+    world.escrow.unpause(&successor);
+    assert!(!world.escrow.is_paused());
+
+    // Normal guarded operations resume after the new admin unpauses.
+    let cid = Bytes::from_slice(&env.env, b"post-handover");
+    world
+        .escrow
+        .create_escrow(&cid, &client, &artist, &AMOUNT, &world.config_stub_addr);
+    a::assert_escrow_status(&env, &world.escrow, &cid, CommissionStatus::Locked);
+
+    // And the new admin can pause again.
+    world.escrow.pause(&successor);
+    assert!(world.escrow.is_paused());
+}
+
+#[test]
+fn cancelled_admin_proposal_prevents_subsequent_acceptance() {
+    let env = Environment::new();
+    let admin = env.address();
+    let successor = env.address();
+    let platform_wallet = env.address();
+
+    let world = World::deploy(&env, &admin, &platform_wallet, FEE_BPS);
+    world.escrow.initialize(&admin);
+
+    world.escrow.transfer_admin(&admin, &successor);
+    assert_eq!(world.escrow.get_pending_admin(), Some(successor.clone()));
+
+    // Pending successor cannot cancel the proposal either.
+    assert_eq!(
+        world.escrow.try_cancel_admin_transfer(&successor),
+        Err(Ok(EscrowError::Unauthorized)),
+    );
+    assert_eq!(world.escrow.get_pending_admin(), Some(successor.clone()));
+
+    // Active admin cancels; successor can no longer accept and admin keeps control.
+    world.escrow.cancel_admin_transfer(&admin);
+    assert_eq!(world.escrow.get_pending_admin(), None);
+    assert_eq!(
+        world.escrow.try_accept_admin(&successor),
+        Err(Ok(EscrowError::Unauthorized)),
+    );
+
+    world.escrow.pause(&admin);
+    assert!(world.escrow.is_paused());
+    world.escrow.unpause(&admin);
+    assert!(!world.escrow.is_paused());
 }
