@@ -77,3 +77,47 @@ pub fn assert_correlation_event_present(env: &Environment, domain: Symbol, actio
     });
     assert!(found, "expected a correlation event");
 }
+
+/// Assert an escrow record does not exist (for example after a rolled-back
+/// transaction that must leave no partial state behind).
+pub fn assert_escrow_absent(escrow: &EscrowContractClient, commission_id: &Bytes) {
+    assert!(
+        escrow.try_get_escrow(commission_id).is_err(),
+        "expected escrow record to be absent"
+    );
+}
+
+/// Assert that a set of account balances are exactly as expected. Useful as a
+/// focused rollback assertion when every participating contract/account must
+/// return to its pre-operation state after a failed transaction.
+pub fn assert_balances_unchanged(env: &Environment, expected: &[(&soroban_sdk::Address, i128)]) {
+    for (account, expected_balance) in expected {
+        assert_eq!(
+            env.balance(account),
+            *expected_balance,
+            "unexpected balance; participating contract/account state changed"
+        );
+    }
+}
+
+/// Assert cross-contract rollback invariants for a failed escrow creation:
+/// no escrow record is written and all participating token balances remain at
+/// their pre-operation values.
+pub fn assert_escrow_create_rolled_back(
+    env: &Environment,
+    escrow: &EscrowContractClient,
+    escrow_addr: &soroban_sdk::Address,
+    commission_id: &Bytes,
+    client: &soroban_sdk::Address,
+    client_balance_before: i128,
+    escrow_balance_before: i128,
+) {
+    assert_escrow_absent(escrow, commission_id);
+    assert_balances_unchanged(
+        env,
+        &[
+            (client, client_balance_before),
+            (escrow_addr, escrow_balance_before),
+        ],
+    );
+}

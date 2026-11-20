@@ -13,6 +13,9 @@ pub enum DataKey {
     CampaignWasmHash,
     DeploymentFee,
     Treasury,
+    /// Registry of deployed campaign contract addresses by deployment salt.
+    /// Committed only after a deployment succeeds to keep registration atomic.
+    DeployedCampaign(BytesN<32>),
 }
 
 #[contracttype]
@@ -80,11 +83,22 @@ impl CampaignFactoryContract {
             .unwrap_or(0)
     }
 
+    /// Return the deployed campaign address for a salt, if any.
+    pub fn get_deployed_campaign(env: Env, salt: BytesN<32>) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DeployedCampaign(salt))
+    }
+
     /// Deploy a new campaign instance from the stored WASM hash.
     ///
-    /// When the deployment fee is greater than zero, `fee` XLM is
-    /// transferred from `creator` to the treasury. `creator` must authorize
-    /// both the fee transfer and the deployment itself.
+    /// Deployment inputs are validated before creating a child contract: the
+    /// factory must be initialized, a supported deployment WASM hash must be
+    /// configured, and the salt must not have been deployed/registered already.
+    ///
+    /// Registration is atomic: the deployed address is recorded and the success
+    /// event is emitted only after deployment succeeds. If deployment fails, no
+    /// registry entry or success event is left behind.
     pub fn deploy_campaign(
         env: Env,
         creator: Address,
@@ -92,11 +106,23 @@ impl CampaignFactoryContract {
         salt: BytesN<32>,
     ) -> Address {
         creator.require_auth();
+        if !env.storage().instance().has(&DataKey::Initialized) {
+            panic!("contract not initialized");
+        }
+
         let wasm_hash: BytesN<32> = env
             .storage()
             .instance()
             .get(&DataKey::CampaignWasmHash)
             .expect("wasm hash not set");
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::DeployedCampaign(salt.clone()))
+        {
+            panic!("campaign already deployed for salt");
+        }
 
         let fee = Self::get_deployment_fee(env.clone());
         if fee > 0 {
@@ -112,6 +138,16 @@ impl CampaignFactoryContract {
             .deployer()
             .with_address(creator.clone(), salt.clone())
             .deploy(wasm_hash);
+
+        // Commit registry state only after deployment succeeds.
+        env.storage()
+            .persistent()
+            .set(&DataKey::DeployedCampaign(salt.clone()), &contract_address);
+        env.storage().persistent().extend_ttl(
+            &DataKey::DeployedCampaign(salt.clone()),
+            100_000,
+            100_000,
+        );
 
         env.events().publish(
             (Symbol::new(&env, "campaign_deployed"),),

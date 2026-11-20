@@ -9,7 +9,10 @@ use integration_framework::assertions as a;
 use integration_framework::dsl::Steps;
 use integration_framework::{deploy_commission_stub, Environment, Scenario};
 use platform_config::types::AddressEnvironment;
-use soroban_sdk::{symbol_short, Bytes};
+use soroban_sdk::{symbol_short, Bytes, BytesN};
+use campaign_factory::{CampaignFactoryContract, CampaignFactoryContractClient};
+use soroban_sdk::testutils::Events as _;
+use soroban_sdk::TryFromVal;
 
 const AMOUNT: i128 = 10_000;
 const FEE_BPS: u32 = 500;
@@ -90,6 +93,134 @@ fn full_escrow_lifecycle_with_registry_and_correlation() {
     assert_eq!(settled.state, escrow::AtomicCommitState::Settled);
 }
 #[test]
+fn failed_multi_contract_operation_rolls_back_participating_state() {
+    let env = Environment::new();
+    let admin = env.address();
+    let platform_wallet = env.address();
+    let client = env.address();
+    let artist = env.address();
+
+    // Client has less than the requested escrow amount, so the token transfer
+    // (and the overall create_escrow transaction) must fail and roll back.
+    env.mint(&client, AMOUNT - 1);
+
+    let scenario = Scenario::begin(&env, &admin, &platform_wallet, FEE_BPS);
+    let world = scenario.finish();
+    let cid = Bytes::from_slice(&env.env, b"rollback-001");
+
+    let client_balance_before = env.balance(&client);
+    let escrow_balance_before = env.balance(&world.escrow_addr);
+
+    let result = world.escrow.try_create_escrow(
+        &cid,
+        &client,
+        &artist,
+        &AMOUNT,
+        &world.config_stub_addr,
+    );
+    assert!(result.is_err(), "create_escrow must fail when client balance is insufficient");
+
+    // Focused rollback assertions: escrow storage and participating token balances
+    // must all return to their pre-operation state.
+    a::assert_escrow_create_rolled_back(
+        &env,
+        &world.escrow,
+        &world.escrow_addr,
+        &cid,
+        &client,
+        client_balance_before,
+        escrow_balance_before,
+    );
+    a::assert_balances_unchanged(
+        &env,
+        &[
+            (&platform_wallet, 0),
+            (&artist, 0),
+        ],
+    );
+}
+
+#[test]
+fn factory_rejects_invalid_deployment_inputs_before_creating_child() {
+    let env = Environment::new();
+    let admin = env.address();
+    let treasury = env.address();
+    let creator = env.address();
+    let salt = BytesN::from_array(&env.env, [7u8; 32]);
+
+    let factory_id = env.env.register_contract(None, CampaignFactoryContract);
+    let factory = CampaignFactoryContractClient::new(&env.env, &factory_id);
+
+    // Not initialized -> rejected before child creation.
+    let before = env.env.events().all().len();
+    assert!(factory
+        .try_deploy_campaign(&creator, &env.usdc, &salt)
+        .is_err());
+    assert!(factory.get_deployed_campaign(&salt).is_none());
+    assert_eq!(env.env.events().all().len(), before, "failed input validation must not emit success event");
+
+    factory.initialize(&admin, &treasury);
+
+    // Initialized but unsupported/missing deployment version (no wasm hash configured)
+    // -> rejected before child creation.
+    let before = env.env.events().all().len();
+    assert!(factory
+        .try_deploy_campaign(&creator, &env.usdc, &salt)
+        .is_err());
+    assert!(factory.get_deployed_campaign(&salt).is_none());
+    assert_eq!(env.env.events().all().len(), before, "rejected request must not emit success event");
+
+    // A valid request is one with required deployment inputs configured and a
+    // previously-unused salt; if deployment cannot proceed, rejection must still
+    // leave no registered address or success event behind.
+    let wasm_hash = BytesN::from_array(&env.env, [9u8; 32]);
+    factory.update_wasm_hash(&admin, &wasm_hash);
+    let before = env.env.events().all().len();
+    let _ = factory.try_deploy_campaign(&creator, &env.usdc, &salt);
+    assert!(
+        factory.get_deployed_campaign(&salt).is_none(),
+        "deployment failure must not register a child contract"
+    );
+    assert_eq!(env.env.events().all().len(), before, "deployment failure must not emit success event");
+}
+
+#[test]
+fn factory_registration_is_atomic_on_failed_deployment() {
+    let env = Environment::new();
+    let admin = env.address();
+    let treasury = env.address();
+    let creator = env.address();
+    let salt = BytesN::from_array(&env.env, [5u8; 32]);
+
+    let factory_id = env.env.register_contract(None, CampaignFactoryContract);
+    let factory = CampaignFactoryContractClient::new(&env.env, &factory_id);
+    factory.initialize(&admin, &treasury);
+
+    // Configure an unavailable/unsupported wasm hash so child deployment fails.
+    let missing_wasm_hash = BytesN::from_array(&env.env, [42u8; 32]);
+    factory.update_wasm_hash(&admin, &missing_wasm_hash);
+
+    let events_before = env.env.events().all().len();
+    let result = factory.try_deploy_campaign(&creator, &env.usdc, &salt);
+    assert!(result.is_err(), "deployment with unavailable wasm must fail");
+
+    // Registry state and success event must only be committed on successful deploy.
+    assert!(
+        factory.get_deployed_campaign(&salt).is_none(),
+        "failed deployment must not leave a registered address"
+    );
+    assert_eq!(
+        env.env.events().all().len(),
+        events_before,
+        "failed deployment must not emit a success event"
+    );
+
+    // A second attempt with the same validated inputs also fails without leaving
+    // partial registry/event state behind.
+    let result_retry = factory.try_deploy_campaign(&creator, &env.usdc, &salt);
+    assert!(result_retry.is_err());
+    assert!(factory.get_deployed_campaign(&salt).is_none());
+    assert_eq!(env.env.events().all().len(), events_before);
 fn rejected_config_updates_preserve_existing_state() {
     let env = Environment::new();
     let admin = env.address();
