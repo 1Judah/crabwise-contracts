@@ -23,6 +23,8 @@ include!("../../semver_types.rs");
 #[contract]
 pub struct PlatformConfigContract;
 
+const MAX_FEE_BPS: u32 = 1_000;
+
 #[contractimpl]
 impl PlatformConfigContract {
     pub fn initialize(
@@ -35,7 +37,7 @@ impl PlatformConfigContract {
         if is_initialized(&env) {
             return Err(ConfigError::AlreadyInitialized);
         }
-        if fee_bps > 1000 {
+        if fee_bps > MAX_FEE_BPS {
             return Err(ConfigError::InvalidFeeBps);
         }
         set_admin(&env, &admin);
@@ -83,7 +85,7 @@ impl PlatformConfigContract {
     pub fn set_fee_bps(env: Env, fee_bps: u32) -> Result<(), ConfigError> {
         let admin = get_admin(&env);
         admin.require_auth();
-        if fee_bps > 1000 {
+        if fee_bps > MAX_FEE_BPS {
             return Err(ConfigError::InvalidFeeBps);
         }
         let old_fee = get_fee_bps(&env);
@@ -130,7 +132,7 @@ impl PlatformConfigContract {
     ) -> Result<(), ConfigError> {
         let admin = get_admin(&env);
         admin.require_auth();
-        if max_fee_bps > 1000 {
+        if max_fee_bps > MAX_FEE_BPS {
             return Err(ConfigError::InvalidFeeBps);
         }
         let meta = FeeTokenMetadata {
@@ -274,7 +276,7 @@ impl PlatformConfigContract {
         if stored != admin {
             return Err(ConfigError::Unauthorized);
         }
-        if tier.min_volume < 0 || tier.fee_bps > 1000 {
+        if tier.min_volume < 0 || tier.fee_bps > MAX_FEE_BPS {
             return Err(ConfigError::InvalidTier);
         }
         let replaced = storage::upsert_fee_tier(&env, &tier);
@@ -308,7 +310,7 @@ impl PlatformConfigContract {
         if stored != admin {
             return Err(ConfigError::Unauthorized);
         }
-        if promotion.end_ledger < promotion.start_ledger || promotion.fee_bps > 1000 {
+        if promotion.end_ledger < promotion.start_ledger || promotion.fee_bps > MAX_FEE_BPS {
             return Err(ConfigError::InvalidPromotion);
         }
         storage::set_promotion(&env, &promotion);

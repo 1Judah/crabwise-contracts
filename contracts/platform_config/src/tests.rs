@@ -3,7 +3,14 @@ use crate::PlatformConfigContractClient;
 use soroban_sdk::testutils::{Address as _, Ledger};
 use soroban_sdk::{symbol_short, Address, Env, Symbol};
 
-fn setup(env: &Env) -> (crate::PlatformConfigContractClient<'_>, Address, Address, Address) {
+fn setup(
+    env: &Env,
+) -> (
+    crate::PlatformConfigContractClient<'_>,
+    Address,
+    Address,
+    Address,
+) {
     env.mock_all_auths();
     let contract_id = env.register_contract(None, crate::PlatformConfigContract);
     let client = PlatformConfigContractClient::new(env, &contract_id);
@@ -23,6 +30,14 @@ fn test_set_fee_bps_success() {
 }
 
 #[test]
+fn test_set_fee_bps_accepts_maximum() {
+    let env = Env::default();
+    let (client, _, _, _) = setup(&env);
+    client.set_fee_bps(&1000);
+    assert_eq!(client.get_config().fee_bps, 1000);
+}
+
+#[test]
 fn test_initialize_success() {
     let env = Env::default();
     env.mock_all_auths();
@@ -38,11 +53,16 @@ fn test_initialize_success() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #4)")]
-fn test_set_fee_bps_too_high() {
+fn test_set_fee_bps_rejects_above_maximum_without_changing_fee() {
     let env = Env::default();
     let (client, _, _, _) = setup(&env);
-    client.set_fee_bps(&1001);
+    let err = client
+        .try_set_fee_bps(&1001)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, crate::ConfigError::InvalidFeeBps);
+    assert_eq!(client.get_config().fee_bps, 500);
 }
 
 #[test]
@@ -149,7 +169,10 @@ fn test_and_production_namespaces_are_independent() {
         client.resolve_address(&AddressEnvironment::Test, &ESCROW),
         test
     );
-    assert_eq!(client.get_registered_address(&AddressEnvironment::Production, &ESCROW), prod);
+    assert_eq!(
+        client.get_registered_address(&AddressEnvironment::Production, &ESCROW),
+        prod
+    );
 }
 
 #[test]
@@ -187,7 +210,10 @@ fn register_overwrites_existing_address() {
     let v2 = Address::generate(&env);
     client.register_address(&AddressEnvironment::Production, &ESCROW, &v1);
     client.register_address(&AddressEnvironment::Production, &ESCROW, &v2);
-    assert_eq!(client.resolve_address(&AddressEnvironment::Production, &ESCROW), v2);
+    assert_eq!(
+        client.resolve_address(&AddressEnvironment::Production, &ESCROW),
+        v2
+    );
 }
 
 #[test]
@@ -213,14 +239,18 @@ fn re_register_invalidates_the_cache() {
     client.resolve_address(&AddressEnvironment::Production, &ESCROW);
     client.register_address(&AddressEnvironment::Production, &ESCROW, &v2);
     let resolved = client.resolve_address(&AddressEnvironment::Production, &ESCROW);
-    assert_eq!(resolved, v2, "re-register must not be masked by a stale cache");
+    assert_eq!(
+        resolved, v2,
+        "re-register must not be masked by a stale cache"
+    );
 }
 
 #[test]
 fn stale_cache_is_refreshed_from_the_registry() {
     let env = Env::default();
     // Move the ledger forward so a stamp of 0 looks stale against the TTL.
-    env.ledger().set_sequence_number(crate::storage::RESOLUTION_CACHE_TTL_LEDGERS + 10);
+    env.ledger()
+        .set_sequence_number(crate::storage::RESOLUTION_CACHE_TTL_LEDGERS + 10);
     let (client, _admin, _, _) = setup(&env);
     let escrow_addr = Address::generate(&env);
     client.register_address(&AddressEnvironment::Production, &ESCROW, &escrow_addr);
@@ -240,11 +270,15 @@ fn stale_cache_is_refreshed_from_the_registry() {
     let cached: ResolutionCacheEntry =
         client.resolution_cache(&AddressEnvironment::Production, &ESCROW);
     assert!(
-        env.ledger().sequence() - cached.resolved_ledger > crate::storage::RESOLUTION_CACHE_TTL_LEDGERS
+        env.ledger().sequence() - cached.resolved_ledger
+            > crate::storage::RESOLUTION_CACHE_TTL_LEDGERS
     );
 
     // The re-resolve returns the same address (still registered) and refreshes the stamp.
-    assert_eq!(client.resolve_address(&AddressEnvironment::Production, &ESCROW), escrow_addr);
+    assert_eq!(
+        client.resolve_address(&AddressEnvironment::Production, &ESCROW),
+        escrow_addr
+    );
     let fresh: ResolutionCacheEntry =
         client.resolution_cache(&AddressEnvironment::Production, &ESCROW);
     assert_eq!(fresh.resolved_ledger, env.ledger().sequence());
@@ -284,8 +318,14 @@ fn fee_tiers_are_exported_and_lower_the_fee() {
     let env = Env::default();
     let (client, admin, _, _) = setup(&env);
 
-    let five_pc = FeeTier { min_volume: 0, fee_bps: 500 };
-    let four_pc = FeeTier { min_volume: 50_000, fee_bps: 400 };
+    let five_pc = FeeTier {
+        min_volume: 0,
+        fee_bps: 500,
+    };
+    let four_pc = FeeTier {
+        min_volume: 50_000,
+        fee_bps: 400,
+    };
     assert!(!client.upsert_fee_tier(&admin, &five_pc));
     assert!(!client.upsert_fee_tier(&admin, &four_pc));
     // Replacing an existing threshold reports `true`.
@@ -308,7 +348,10 @@ fn volume_tracks_cumulative_and_drives_discounts() {
     let (client, admin, _, _) = setup(&env);
     let payer = Address::generate(&env);
 
-    let tier = FeeTier { min_volume: 100_000, fee_bps: 300 };
+    let tier = FeeTier {
+        min_volume: 100_000,
+        fee_bps: 300,
+    };
     client.upsert_fee_tier(&admin, &tier);
 
     assert_eq!(client.get_volume(&payer), 0);
@@ -325,7 +368,11 @@ fn promotion_applies_only_inside_its_window() {
     let (client, admin, _, _) = setup(&env);
 
     env.ledger().with_mut(|l| l.sequence_number = 1_000);
-    let promo = Promotion { start_ledger: 1_000, end_ledger: 2_000, fee_bps: 100 };
+    let promo = Promotion {
+        start_ledger: 1_000,
+        end_ledger: 2_000,
+        fee_bps: 100,
+    };
     client.set_promotion(&admin, &promo);
     assert!(client.is_promotion_active());
 
@@ -365,20 +412,39 @@ fn invalid_fee_configs_are_rejected() {
     let env = Env::default();
     let (client, admin, _, _) = setup(&env);
 
-    let bad_tier = FeeTier { min_volume: 0, fee_bps: 1001 };
+    let bad_tier = FeeTier {
+        min_volume: 0,
+        fee_bps: 1001,
+    };
     assert_eq!(
-        client.try_upsert_fee_tier(&admin, &bad_tier).err().unwrap().unwrap(),
+        client
+            .try_upsert_fee_tier(&admin, &bad_tier)
+            .err()
+            .unwrap()
+            .unwrap(),
         crate::errors::ConfigError::InvalidTier
     );
 
-    let inverted = Promotion { start_ledger: 100, end_ledger: 50, fee_bps: 100 };
+    let inverted = Promotion {
+        start_ledger: 100,
+        end_ledger: 50,
+        fee_bps: 100,
+    };
     assert_eq!(
-        client.try_set_promotion(&admin, &inverted).err().unwrap().unwrap(),
+        client
+            .try_set_promotion(&admin, &inverted)
+            .err()
+            .unwrap()
+            .unwrap(),
         crate::errors::ConfigError::InvalidPromotion
     );
 
     assert_eq!(
-        client.try_set_referral_config(&admin, &ReferralConfig { bps: 15_000 }).err().unwrap().unwrap(),
+        client
+            .try_set_referral_config(&admin, &ReferralConfig { bps: 15_000 })
+            .err()
+            .unwrap()
+            .unwrap(),
         crate::errors::ConfigError::InvalidReferralBps
     );
 }
@@ -414,4 +480,342 @@ fn fee_split_rounding_conserves_uneven_amounts() {
         assert_eq!(b.payout + b.fee, b.amount);
         assert_eq!(b.payout + b.platform_fee + b.referral_fee, b.amount);
     }
+// ── Circuit-breaker boundary and recovery tests (closes #8) ───────────────────
+
+fn on<T>(env: &Env, contract_id: &Address, f: impl FnOnce() -> T) -> T {
+    env.as_contract(contract_id, f)
+}
+
+#[test]
+fn test_circuit_breaker_boundary_thresholds_and_insufficient_samples() {
+    let env = Env::default();
+    let (client, admin, _, _) = setup(&env);
+
+    on(&env, &client.address, || {
+        // Initial defaults
+        assert_eq!(
+            shared::circuit_breaker::get_halt_error_bps(&env),
+            shared::circuit_breaker::DEFAULT_HALT_ERROR_BPS
+        );
+        assert!(!shared::circuit_breaker::is_halted(&env));
+        assert_eq!(shared::circuit_breaker::require_not_halted(&env), Ok(()));
+
+        // Configure custom threshold (300 bps = 3%)
+        shared::circuit_breaker::set_config(
+            &env,
+            &shared::circuit_breaker::CircuitBreakerConfig {
+                admin: admin.clone(),
+                halt_error_bps: 300,
+            },
+        );
+        assert_eq!(shared::circuit_breaker::get_halt_error_bps(&env), 300);
+
+        // Record 8 failures (below MIN_SAMPLE_FOR_HALT = 10)
+        for _ in 0..8 {
+            let halted = shared::circuit_breaker::record_failure(&env);
+            assert!(!halted, "must not halt when sample count is insufficient");
+        }
+
+        assert!(!shared::circuit_breaker::is_halted(&env));
+        let state = shared::circuit_breaker::get_state(&env);
+        assert_eq!(state.total_calls, 8);
+        assert_eq!(state.error_count, 8);
+        assert_eq!(state.ok_count, 0);
+        assert!(!state.halted);
+        assert_eq!(state.halt_error_bps, 300);
+    });
+
+    // Cross-check health metrics reflected via contract client
+    let metrics = client.get_health_metrics();
+    assert_eq!(metrics.error_count, 8);
+}
+
+#[test]
+fn test_circuit_breaker_boundary_exact_threshold_vs_halt() {
+    let env = Env::default();
+    let (client, admin, _, _) = setup(&env);
+
+    on(&env, &client.address, || {
+        shared::circuit_breaker::set_config(
+            &env,
+            &shared::circuit_breaker::CircuitBreakerConfig {
+                admin: admin.clone(),
+                halt_error_bps: 500, // 5%
+            },
+        );
+    });
+
+    on(&env, &client.address, || {
+        // 95 successes and 5 failures = exactly 500 bps (5%)
+        for _ in 0..95 {
+            shared::circuit_breaker::record_success(&env);
+        }
+        for _ in 0..5 {
+            let halted = shared::circuit_breaker::record_failure(&env);
+            assert!(!halted, "exact threshold rate must not halt");
+        }
+    });
+
+    assert!(
+        !on(
+            &env,
+            &client.address,
+            || shared::circuit_breaker::is_halted(&env)
+        ),
+        "circuit breaker must not halt exactly at threshold"
+    );
+    assert_eq!(
+        on(&env, &client.address, || {
+            shared::circuit_breaker::require_not_halted(&env)
+        }),
+        Ok(())
+    );
+
+    // 1 additional failure crosses the boundary (6 errors / 101 total ~ 594 bps > 500)
+    let did_halt = on(&env, &client.address, || {
+        shared::circuit_breaker::record_failure(&env)
+    });
+    assert!(did_halt, "crossing threshold must trigger auto-halt");
+    assert!(on(&env, &client.address, || {
+        shared::circuit_breaker::is_halted(&env)
+    }));
+    assert_eq!(
+        on(&env, &client.address, || {
+            shared::circuit_breaker::require_not_halted(&env)
+        }),
+        Err(shared::circuit_breaker::CircuitBreakerError::Halted)
+    );
+
+    let halt_seq = on(&env, &client.address, || {
+        shared::circuit_breaker::last_halt_ledger(&env)
+    });
+    assert_eq!(halt_seq, env.ledger().sequence());
+
+    // Repeated failures while already halted must not trigger duplicate halts
+    let duplicate = on(&env, &client.address, || {
+        shared::circuit_breaker::record_failure(&env)
+    });
+    assert!(
+        !duplicate,
+        "repeated failure while halted must return false"
+    );
+    assert_eq!(
+        on(&env, &client.address, || {
+            shared::circuit_breaker::last_halt_ledger(&env)
+        }),
+        halt_seq
+    );
+
+    let err = on(&env, &client.address, || {
+        shared::circuit_breaker::halt(&env, &admin).unwrap_err()
+    });
+    assert_eq!(
+        err,
+        shared::circuit_breaker::CircuitBreakerError::AlreadyHalted
+    );
+
+    // Health check reflects paused state
+    let report = client.health_check();
+    assert_eq!(report.status, shared::HealthStatus::Unhealthy);
+}
+
+#[test]
+fn test_circuit_breaker_boundary_timelocked_recovery_and_transient_failures() {
+    let env = Env::default();
+    let (client, admin, _, _) = setup(&env);
+
+    on(&env, &client.address, || {
+        shared::circuit_breaker::set_config(
+            &env,
+            &shared::circuit_breaker::CircuitBreakerConfig {
+                admin: admin.clone(),
+                halt_error_bps: 500,
+            },
+        );
+    });
+
+    // Cause auto-halt with 10 failures
+    on(&env, &client.address, || {
+        for _ in 0..10 {
+            shared::circuit_breaker::record_failure(&env);
+        }
+    });
+    assert!(on(&env, &client.address, || {
+        shared::circuit_breaker::is_halted(&env)
+    }));
+
+    // Schedule recovery for 20 ledgers
+    let start_seq = env.ledger().sequence();
+    let eta = on(&env, &client.address, || {
+        shared::circuit_breaker::schedule_recovery(&env, &admin, 20).unwrap()
+    });
+    assert_eq!(eta, start_seq + 20);
+    assert_eq!(
+        on(&env, &client.address, || {
+            shared::circuit_breaker::get_state(&env).recovery_eta
+        }),
+        Some(eta)
+    );
+
+    // Resume before maturity is rejected
+    env.ledger().with_mut(|l| l.sequence_number = eta - 1);
+    let err = on(&env, &client.address, || {
+        shared::circuit_breaker::resume(&env, &admin).unwrap_err()
+    });
+    assert_eq!(
+        err,
+        shared::circuit_breaker::CircuitBreakerError::RecoveryPending
+    );
+    assert!(on(&env, &client.address, || {
+        shared::circuit_breaker::is_halted(&env)
+    }));
+
+    // Resume allowed at exact maturity ledger
+    env.ledger().with_mut(|l| l.sequence_number = eta);
+    on(&env, &client.address, || {
+        shared::circuit_breaker::resume(&env, &admin).unwrap();
+    });
+
+    assert!(!on(&env, &client.address, || {
+        shared::circuit_breaker::is_halted(&env)
+    }));
+    assert_eq!(
+        on(&env, &client.address, || {
+            shared::circuit_breaker::require_not_halted(&env)
+        }),
+        Ok(())
+    );
+    assert_eq!(
+        on(&env, &client.address, || {
+            shared::circuit_breaker::get_state(&env).recovery_eta
+        }),
+        None
+    );
+
+    // Sample counters must be reset upon recovery
+    let state = on(&env, &client.address, || {
+        shared::circuit_breaker::get_state(&env)
+    });
+    assert_eq!(state.total_calls, 0);
+    assert_eq!(state.ok_count, 0);
+    assert_eq!(state.error_count, 0);
+    assert_eq!(state.error_bps, 0);
+
+    // Advance sequence past the minimum halt interval
+    env.ledger().with_mut(|l| {
+        l.sequence_number += shared::circuit_breaker::MIN_HALT_INTERVAL_LEDGERS + 5;
+    });
+
+    // A new transient failure must not immediately re-halt the breaker
+    let rehalted = on(&env, &client.address, || {
+        shared::circuit_breaker::record_failure(&env)
+    });
+    assert!(
+        !rehalted,
+        "transient failure after recovery must not cause immediate re-halt"
+    );
+    assert!(!on(&env, &client.address, || {
+        shared::circuit_breaker::is_halted(&env)
+    }));
+    assert_eq!(
+        on(&env, &client.address, || {
+            shared::circuit_breaker::require_not_halted(&env)
+        }),
+        Ok(())
+    );
+
+    let state_after = on(&env, &client.address, || {
+        shared::circuit_breaker::get_state(&env)
+    });
+    assert_eq!(state_after.total_calls, 1);
+    assert_eq!(state_after.error_count, 1);
+    assert_eq!(state_after.ok_count, 0);
+}
+
+#[test]
+fn test_circuit_breaker_boundary_flapping_guard_across_recovery_cycles() {
+    let env = Env::default();
+    let (client, admin, _, _) = setup(&env);
+
+    env.ledger().with_mut(|l| l.sequence_number = 500);
+
+    on(&env, &client.address, || {
+        shared::circuit_breaker::set_config(
+            &env,
+            &shared::circuit_breaker::CircuitBreakerConfig {
+                admin: admin.clone(),
+                halt_error_bps: 500,
+            },
+        );
+    });
+
+    // Auto-halt at ledger 500
+    on(&env, &client.address, || {
+        for _ in 0..10 {
+            shared::circuit_breaker::record_failure(&env);
+        }
+    });
+    assert!(on(&env, &client.address, || {
+        shared::circuit_breaker::is_halted(&env)
+    }));
+    assert_eq!(
+        on(&env, &client.address, || {
+            shared::circuit_breaker::last_halt_ledger(&env)
+        }),
+        500
+    );
+
+    // Schedule recovery for 10 ledgers
+    let eta = on(&env, &client.address, || {
+        shared::circuit_breaker::schedule_recovery(&env, &admin, 10).unwrap()
+    });
+    assert_eq!(eta, 510);
+    env.ledger().with_mut(|l| l.sequence_number = 510);
+    on(&env, &client.address, || {
+        shared::circuit_breaker::resume(&env, &admin).unwrap();
+    });
+    assert!(!on(&env, &client.address, || {
+        shared::circuit_breaker::is_halted(&env)
+    }));
+
+    // Advance to ledger 530 (< 60 ledgers since halt at 500)
+    env.ledger().with_mut(|l| l.sequence_number = 530);
+
+    // Rapid failures: 10 errors
+    on(&env, &client.address, || {
+        for _ in 0..10 {
+            shared::circuit_breaker::record_failure(&env);
+        }
+    });
+
+    // Flapping guard must suppress auto-halt
+    assert!(
+        !on(
+            &env,
+            &client.address,
+            || shared::circuit_breaker::is_halted(&env)
+        ),
+        "flapping guard must suppress halt within 60 ledgers of previous halt"
+    );
+
+    // Advance past flapping interval: 560 - 500 = 60 >= MIN_HALT_INTERVAL_LEDGERS
+    env.ledger().with_mut(|l| l.sequence_number = 560);
+
+    // Subsequent failure now triggers a valid halt
+    let halted = on(&env, &client.address, || {
+        shared::circuit_breaker::record_failure(&env)
+    });
+    assert!(
+        halted,
+        "valid halt should fire once flapping interval expires"
+    );
+    assert!(on(&env, &client.address, || {
+        shared::circuit_breaker::is_halted(&env)
+    }));
+    assert_eq!(
+        on(&env, &client.address, || {
+            shared::circuit_breaker::last_halt_ledger(&env)
+        }),
+        560
+    );
 }
