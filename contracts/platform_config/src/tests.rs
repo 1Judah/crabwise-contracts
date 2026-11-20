@@ -849,3 +849,94 @@ fn test_circuit_breaker_boundary_flapping_guard_across_recovery_cycles() {
         560
     );
 }
+
+// ── Config cache invalidation (#15) ──────────────────────────────────────
+
+/// Reads the config so `get_config` populates the instance-storage cache, and
+/// asserts the cache entry really exists so each test starts from a warm cache.
+fn warm_config_cache(
+    env: &Env,
+    client: &PlatformConfigContractClient<'_>,
+) -> crate::types::PlatformConfig {
+    let config = client.get_config();
+    let cached = env.as_contract(&client.address, || {
+        env.storage().instance().has(&symbol_short!("cfgcache"))
+    });
+    assert!(cached, "get_config must populate the cache");
+    config
+}
+
+#[test]
+fn set_fee_bps_refreshes_cached_config() {
+    let env = Env::default();
+    let (client, admin, wallet, token) = setup(&env);
+    assert_eq!(warm_config_cache(&env, &client).fee_bps, 500);
+
+    client.set_fee_bps(&250);
+
+    let config = client.get_config();
+    assert_eq!(config.fee_bps, 250);
+    assert_eq!(config.admin, admin);
+    assert_eq!(config.platform_wallet, wallet);
+    assert_eq!(config.usdc_token, token);
+}
+
+#[test]
+fn set_platform_wallet_refreshes_cached_config() {
+    let env = Env::default();
+    let (client, admin, wallet, token) = setup(&env);
+    assert_eq!(warm_config_cache(&env, &client).platform_wallet, wallet);
+
+    let new_wallet = Address::generate(&env);
+    client.set_platform_wallet(&new_wallet);
+
+    let config = client.get_config();
+    assert_eq!(config.platform_wallet, new_wallet);
+    assert_eq!(config.admin, admin);
+    assert_eq!(config.fee_bps, 500);
+    assert_eq!(config.usdc_token, token);
+}
+
+#[test]
+fn accept_admin_refreshes_cached_config() {
+    let env = Env::default();
+    let (client, admin, wallet, token) = setup(&env);
+    assert_eq!(warm_config_cache(&env, &client).admin, admin);
+
+    let new_admin = Address::generate(&env);
+    client.transfer_admin(&new_admin);
+    // Only a pending admin is recorded so far; the cached admin is still correct.
+    assert_eq!(client.get_config().admin, admin);
+
+    client.accept_admin();
+
+    let config = client.get_config();
+    assert_eq!(config.admin, new_admin);
+    assert_eq!(config.fee_bps, 500);
+    assert_eq!(config.platform_wallet, wallet);
+    assert_eq!(config.usdc_token, token);
+}
+
+#[test]
+fn consecutive_setters_each_refresh_cached_config() {
+    let env = Env::default();
+    let (client, _admin, _wallet, token) = setup(&env);
+    let new_wallet = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+
+    warm_config_cache(&env, &client);
+    client.set_fee_bps(&300);
+    assert_eq!(warm_config_cache(&env, &client).fee_bps, 300);
+
+    client.set_platform_wallet(&new_wallet);
+    assert_eq!(warm_config_cache(&env, &client).platform_wallet, new_wallet);
+
+    client.transfer_admin(&new_admin);
+    client.accept_admin();
+
+    let config = client.get_config();
+    assert_eq!(config.admin, new_admin);
+    assert_eq!(config.fee_bps, 300);
+    assert_eq!(config.platform_wallet, new_wallet);
+    assert_eq!(config.usdc_token, token);
+}
