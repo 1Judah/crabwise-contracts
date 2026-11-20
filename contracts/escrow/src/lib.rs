@@ -628,7 +628,9 @@ impl EscrowContract {
         if r.status != CommissionStatus::Locked && r.status != CommissionStatus::PartiallyReleased {
             return Err(EscrowError::InvalidStatus);
         }
-        if env.ledger().sequence() < auto_release_ledger {
+        let current_ledger = env.ledger().sequence();
+        // The deadline ledger itself is eligible for auto-release.
+        if current_ledger < auto_release_ledger {
             return Err(EscrowError::NotExpired);
         }
 

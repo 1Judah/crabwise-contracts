@@ -165,8 +165,10 @@ pub fn set_config(env: &Env, config: &CircuitBreakerConfig) {
     env.storage()
         .instance()
         .set(&CircuitBreakerKey::HaltErrorBps, &config.halt_error_bps);
-    env.events()
-        .publish((symbol_short!("cb_cfg"),), (config.admin.clone(), config.halt_error_bps));
+    env.events().publish(
+        (symbol_short!("cb_cfg"),),
+        (config.admin.clone(), config.halt_error_bps),
+    );
 }
 
 /// Read the configured halt threshold, falling back to the default.
@@ -325,6 +327,17 @@ pub fn resume(env: &Env, admin: &Address) -> Result<(), CircuitBreakerError> {
         pause::PauseError::RecoveryPending => CircuitBreakerError::RecoveryPending,
         _ => CircuitBreakerError::NotHalted,
     })?;
+
+    // Reset error and ok counters so cumulative historical error metrics from the
+    // pre-recovery incident do not immediately re-trigger an automatic halt on the
+    // next failure.
+    let mut metrics = health::get_metrics(env);
+    metrics.ok_count = 0;
+    metrics.error_count = 0;
+    env.storage()
+        .instance()
+        .set(&health::HealthKey::Metrics, &metrics);
+
     env.events().publish(
         (symbol_short!("cb_rsm"),),
         CircuitResumedEvent {
@@ -339,7 +352,11 @@ pub fn resume(env: &Env, admin: &Address) -> Result<(), CircuitBreakerError> {
 pub fn get_state(env: &Env) -> CircuitBreakerState {
     let metrics = health::get_metrics(env);
     let total = metrics.ok_count.saturating_add(metrics.error_count);
-    let bps = if total == 0 { 0 } else { health::error_bps(&metrics) };
+    let bps = if total == 0 {
+        0
+    } else {
+        health::error_bps(&metrics)
+    };
     CircuitBreakerState {
         halted: is_halted(env),
         error_bps: bps,
@@ -390,12 +407,11 @@ pub fn schedule_recovery(
     if !is_halted(env) {
         return Err(CircuitBreakerError::NotHalted);
     }
-    pause::schedule_recovery(env, admin, delay_ledgers)
-        .map_err(|e| match e {
-            pause::PauseError::NotPaused => CircuitBreakerError::NotHalted,
-            pause::PauseError::InvalidRecoveryDelay => CircuitBreakerError::InvalidThreshold,
-            _ => CircuitBreakerError::RecoveryPending,
-        })
+    pause::schedule_recovery(env, admin, delay_ledgers).map_err(|e| match e {
+        pause::PauseError::NotPaused => CircuitBreakerError::NotHalted,
+        pause::PauseError::InvalidRecoveryDelay => CircuitBreakerError::InvalidThreshold,
+        _ => CircuitBreakerError::RecoveryPending,
+    })
 }
 
 /// Cancel a previously scheduled recovery (admin only). The contract stays halted.
@@ -437,6 +453,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn valid_threshold_constants() {
         assert!(DEFAULT_HALT_ERROR_BPS <= 10_000);
         assert!(MIN_SAMPLE_FOR_HALT >= 1);
@@ -500,10 +517,13 @@ mod tests {
         let admin = Address::generate(&env);
 
         on(&env, &id, || {
-            set_config(&env, &CircuitBreakerConfig {
-                admin: admin.clone(),
-                halt_error_bps: DEFAULT_HALT_ERROR_BPS,
-            })
+            set_config(
+                &env,
+                &CircuitBreakerConfig {
+                    admin: admin.clone(),
+                    halt_error_bps: DEFAULT_HALT_ERROR_BPS,
+                },
+            )
         });
 
         assert!(!on(&env, &id, || is_halted(&env)));
@@ -529,10 +549,13 @@ mod tests {
         let admin = Address::generate(&env);
 
         on(&env, &id, || {
-            set_config(&env, &CircuitBreakerConfig {
-                admin: admin.clone(),
-                halt_error_bps: 500, // 5%
-            })
+            set_config(
+                &env,
+                &CircuitBreakerConfig {
+                    admin: admin.clone(),
+                    halt_error_bps: 500, // 5%
+                },
+            )
         });
 
         // Record 5 errors out of 10 calls (50% error rate, well above 5%).
@@ -564,10 +587,13 @@ mod tests {
         let admin = Address::generate(&env);
 
         on(&env, &id, || {
-            set_config(&env, &CircuitBreakerConfig {
-                admin: admin.clone(),
-                halt_error_bps: 500, // 5%
-            })
+            set_config(
+                &env,
+                &CircuitBreakerConfig {
+                    admin: admin.clone(),
+                    halt_error_bps: 500, // 5%
+                },
+            )
         });
 
         on(&env, &id, || {
@@ -588,10 +614,13 @@ mod tests {
         let admin = Address::generate(&env);
 
         on(&env, &id, || {
-            set_config(&env, &CircuitBreakerConfig {
-                admin: admin.clone(),
-                halt_error_bps: 100, // 1% threshold
-            })
+            set_config(
+                &env,
+                &CircuitBreakerConfig {
+                    admin: admin.clone(),
+                    halt_error_bps: 100, // 1% threshold
+                },
+            )
         });
 
         // Only 2 samples — below MIN_SAMPLE_FOR_HALT
@@ -608,10 +637,13 @@ mod tests {
         let admin = Address::generate(&env);
 
         on(&env, &id, || {
-            set_config(&env, &CircuitBreakerConfig {
-                admin: admin.clone(),
-                halt_error_bps: 500,
-            })
+            set_config(
+                &env,
+                &CircuitBreakerConfig {
+                    admin: admin.clone(),
+                    halt_error_bps: 500,
+                },
+            )
         });
 
         on(&env, &id, || {
@@ -634,10 +666,13 @@ mod tests {
         let admin = Address::generate(&env);
 
         on(&env, &id, || {
-            set_config(&env, &CircuitBreakerConfig {
-                admin: admin.clone(),
-                halt_error_bps: 500,
-            })
+            set_config(
+                &env,
+                &CircuitBreakerConfig {
+                    admin: admin.clone(),
+                    halt_error_bps: 500,
+                },
+            )
         });
 
         on(&env, &id, || halt(&env, &admin).unwrap());
@@ -674,5 +709,317 @@ mod tests {
                 assert_ne!(codes[i], codes[j], "duplicate error code");
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #5)")]
+    fn set_config_rejects_zero_threshold() {
+        let (env, id) = setup();
+        let admin = Address::generate(&env);
+        on(&env, &id, || {
+            set_config(
+                &env,
+                &CircuitBreakerConfig {
+                    admin,
+                    halt_error_bps: 0,
+                },
+            )
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #5)")]
+    fn set_config_rejects_threshold_above_10000() {
+        let (env, id) = setup();
+        let admin = Address::generate(&env);
+        on(&env, &id, || {
+            set_config(
+                &env,
+                &CircuitBreakerConfig {
+                    admin,
+                    halt_error_bps: 10_001,
+                },
+            )
+        });
+    }
+
+    #[test]
+    fn custom_threshold_is_respected() {
+        let (env, id) = setup();
+        let admin = Address::generate(&env);
+        on(&env, &id, || {
+            set_config(
+                &env,
+                &CircuitBreakerConfig {
+                    admin: admin.clone(),
+                    halt_error_bps: 1000, // 10%
+                },
+            )
+        });
+        assert_eq!(on(&env, &id, || get_halt_error_bps(&env)), 1000);
+    }
+
+    #[test]
+    fn just_above_threshold_auto_halts() {
+        let (env, id) = setup();
+        let admin = Address::generate(&env);
+
+        on(&env, &id, || {
+            set_config(
+                &env,
+                &CircuitBreakerConfig {
+                    admin: admin.clone(),
+                    halt_error_bps: 500, // 5%
+                },
+            )
+        });
+
+        // 94 successes + 6 errors = 100 calls (600 bps = 6% > 5%)
+        on(&env, &id, || {
+            for _ in 0..94 {
+                record_success(&env);
+            }
+            for _ in 0..6 {
+                record_failure(&env);
+            }
+        });
+
+        assert!(on(&env, &id, || is_halted(&env)));
+        let state = on(&env, &id, || get_state(&env));
+        assert!(state.halted);
+        assert_eq!(state.error_bps, 600);
+        assert_eq!(state.total_calls, 100);
+    }
+
+    #[test]
+    fn repeated_failures_while_halted_do_not_duplicate_halt() {
+        let (env, id) = setup();
+        let admin = Address::generate(&env);
+
+        on(&env, &id, || {
+            set_config(
+                &env,
+                &CircuitBreakerConfig {
+                    admin: admin.clone(),
+                    halt_error_bps: 500,
+                },
+            )
+        });
+
+        on(&env, &id, || {
+            for _ in 0..5 {
+                record_success(&env);
+            }
+            for _ in 0..5 {
+                record_failure(&env);
+            }
+        });
+        assert!(on(&env, &id, || is_halted(&env)));
+        let halt_ledger = on(&env, &id, || last_halt_ledger(&env));
+
+        // Advance ledger sequence
+        env.ledger().with_mut(|l| l.sequence_number += 5);
+
+        // Additional failures while halted should return false and not update last_halt_ledger
+        let triggered = on(&env, &id, || record_failure(&env));
+        assert!(
+            !triggered,
+            "should not trigger duplicate halt when already halted"
+        );
+        assert_eq!(on(&env, &id, || last_halt_ledger(&env)), halt_ledger);
+
+        // Manual halt while already halted fails with AlreadyHalted
+        let err = on(&env, &id, || halt(&env, &admin).unwrap_err());
+        assert_eq!(err, CircuitBreakerError::AlreadyHalted);
+    }
+
+    #[test]
+    fn recovery_at_exact_maturity_ledger_succeeds() {
+        let (env, id) = setup();
+        let admin = Address::generate(&env);
+
+        on(&env, &id, || {
+            set_config(
+                &env,
+                &CircuitBreakerConfig {
+                    admin: admin.clone(),
+                    halt_error_bps: 500,
+                },
+            )
+        });
+
+        on(&env, &id, || halt(&env, &admin).unwrap());
+        let start_seq = env.ledger().sequence();
+        let eta = on(&env, &id, || schedule_recovery(&env, &admin, 15).unwrap());
+        assert_eq!(eta, start_seq + 15);
+
+        // Advance to eta - 1: resume fails
+        env.ledger().with_mut(|l| l.sequence_number = eta - 1);
+        let err = on(&env, &id, || resume(&env, &admin).unwrap_err());
+        assert_eq!(err, CircuitBreakerError::RecoveryPending);
+        assert!(on(&env, &id, || is_halted(&env)));
+
+        // Advance to exact maturity ledger eta: resume succeeds
+        env.ledger().with_mut(|l| l.sequence_number = eta);
+        on(&env, &id, || resume(&env, &admin).unwrap());
+        assert!(!on(&env, &id, || is_halted(&env)));
+        assert_eq!(on(&env, &id, || require_not_halted(&env)), Ok(()));
+        assert_eq!(on(&env, &id, || get_state(&env).recovery_eta), None);
+    }
+
+    #[test]
+    fn recovery_resets_counters_and_transient_failure_does_not_rehalt() {
+        let (env, id) = setup();
+        let admin = Address::generate(&env);
+
+        on(&env, &id, || {
+            set_config(
+                &env,
+                &CircuitBreakerConfig {
+                    admin: admin.clone(),
+                    halt_error_bps: 500, // 5%
+                },
+            )
+        });
+
+        // Cause an automatic halt with 10 failures
+        on(&env, &id, || {
+            for _ in 0..10 {
+                record_failure(&env);
+            }
+        });
+        assert!(on(&env, &id, || is_halted(&env)));
+
+        // Schedule recovery and advance past maturity
+        let eta = on(&env, &id, || schedule_recovery(&env, &admin, 10).unwrap());
+        env.ledger().with_mut(|l| l.sequence_number = eta);
+
+        // Resume: should reset metrics counters
+        on(&env, &id, || resume(&env, &admin).unwrap());
+        assert!(!on(&env, &id, || is_halted(&env)));
+
+        let state_after_resume = on(&env, &id, || get_state(&env));
+        assert_eq!(state_after_resume.total_calls, 0);
+        assert_eq!(state_after_resume.ok_count, 0);
+        assert_eq!(state_after_resume.error_count, 0);
+        assert_eq!(state_after_resume.error_bps, 0);
+
+        // Even after MIN_HALT_INTERVAL_LEDGERS passes, a new single transient failure
+        // must NOT cause an immediate re-halt because sample count is < MIN_SAMPLE_FOR_HALT.
+        env.ledger()
+            .with_mut(|l| l.sequence_number += MIN_HALT_INTERVAL_LEDGERS + 1);
+
+        let rehalted = on(&env, &id, || record_failure(&env));
+        assert!(!rehalted, "transient failure must not immediately re-halt");
+        assert!(!on(&env, &id, || is_halted(&env)));
+
+        let state_after_transient = on(&env, &id, || get_state(&env));
+        assert_eq!(state_after_transient.total_calls, 1);
+        assert_eq!(state_after_transient.error_count, 1);
+        assert_eq!(state_after_transient.ok_count, 0);
+    }
+
+    #[test]
+    fn flapping_protection_across_recovery_and_subsequent_valid_halt() {
+        let (env, id) = setup();
+        let admin = Address::generate(&env);
+
+        env.ledger().with_mut(|l| l.sequence_number = 100);
+
+        on(&env, &id, || {
+            set_config(
+                &env,
+                &CircuitBreakerConfig {
+                    admin: admin.clone(),
+                    halt_error_bps: 500,
+                },
+            )
+        });
+
+        // Trigger first auto-halt at ledger 100
+        on(&env, &id, || {
+            for _ in 0..10 {
+                record_failure(&env);
+            }
+        });
+        assert!(on(&env, &id, || is_halted(&env)));
+        assert_eq!(on(&env, &id, || last_halt_ledger(&env)), 100);
+
+        // Schedule recovery for 10 ledgers (eta = 110)
+        let eta = on(&env, &id, || schedule_recovery(&env, &admin, 10).unwrap());
+        assert_eq!(eta, 110);
+        env.ledger().with_mut(|l| l.sequence_number = 110);
+        on(&env, &id, || resume(&env, &admin).unwrap());
+        assert!(!on(&env, &id, || is_halted(&env)));
+
+        // Advance to ledger 120 (only 20 ledgers since last halt at 100, < 60)
+        env.ledger().with_mut(|l| l.sequence_number = 120);
+
+        // Incur 10 failures (100% error rate, >= MIN_SAMPLE_FOR_HALT)
+        on(&env, &id, || {
+            for _ in 0..10 {
+                record_failure(&env);
+            }
+        });
+
+        // Flapping guard must suppress auto-halt within MIN_HALT_INTERVAL_LEDGERS
+        assert!(
+            !on(&env, &id, || is_halted(&env)),
+            "flapping guard must prevent re-halt within 60 ledgers of previous halt"
+        );
+
+        // Advance to ledger 160 (160 - 100 = 60 >= MIN_HALT_INTERVAL_LEDGERS)
+        env.ledger().with_mut(|l| l.sequence_number = 160);
+
+        // Subsequent failure now triggers a valid halt
+        let halted_now = on(&env, &id, || record_failure(&env));
+        assert!(
+            halted_now,
+            "subsequent halt should succeed after interval matures"
+        );
+        assert!(on(&env, &id, || is_halted(&env)));
+        assert_eq!(on(&env, &id, || last_halt_ledger(&env)), 160);
+    }
+
+    #[test]
+    fn cancel_recovery_workflow_and_metadata() {
+        let (env, id) = setup();
+        let admin = Address::generate(&env);
+
+        on(&env, &id, || {
+            set_config(
+                &env,
+                &CircuitBreakerConfig {
+                    admin: admin.clone(),
+                    halt_error_bps: 500,
+                },
+            )
+        });
+
+        on(&env, &id, || halt(&env, &admin).unwrap());
+        assert!(on(&env, &id, || is_halted(&env)));
+
+        // Cannot cancel before scheduling
+        let err = on(&env, &id, || cancel_recovery(&env, &admin).unwrap_err());
+        assert_eq!(err, CircuitBreakerError::NotHalted);
+
+        // Schedule recovery
+        let eta = on(&env, &id, || schedule_recovery(&env, &admin, 25).unwrap());
+        assert_eq!(on(&env, &id, || get_state(&env).recovery_eta), Some(eta));
+
+        // Cancel recovery
+        on(&env, &id, || cancel_recovery(&env, &admin).unwrap());
+        assert!(on(&env, &id, || is_halted(&env)));
+        assert_eq!(on(&env, &id, || get_state(&env).recovery_eta), None);
+
+        // Cannot schedule with invalid delays
+        let err = on(&env, &id, || {
+            schedule_recovery(&env, &admin, 0).unwrap_err()
+        });
+        assert_eq!(err, CircuitBreakerError::InvalidThreshold);
+        let err = on(&env, &id, || {
+            schedule_recovery(&env, &admin, pause::MAX_RECOVERY_DELAY_LEDGERS + 1).unwrap_err()
+        });
+        assert_eq!(err, CircuitBreakerError::InvalidThreshold);
     }
 }

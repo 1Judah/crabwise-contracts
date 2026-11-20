@@ -221,4 +221,27 @@ fn factory_registration_is_atomic_on_failed_deployment() {
     assert!(result_retry.is_err());
     assert!(factory.get_deployed_campaign(&salt).is_none());
     assert_eq!(env.env.events().all().len(), events_before);
+fn rejected_config_updates_preserve_existing_state() {
+    let env = Environment::new();
+    let admin = env.address();
+    let platform_wallet = env.address();
+
+    // Initialize config with a known-good fee.
+    let scenario = Scenario::begin(&env, &admin, &platform_wallet, FEE_BPS);
+    let cfg = scenario.finish();
+    let before = cfg.config.get_config();
+    assert_eq!(before.fee_bps, FEE_BPS);
+
+    // Invalid fee update is rejected at the boundary and leaves config unchanged.
+    let invalid = cfg.config.try_set_fee_bps(&1001);
+    assert!(invalid.is_err(), "fee bps above the allowed range must be rejected");
+    let after = cfg.config.get_config();
+    assert_eq!(after.fee_bps, before.fee_bps);
+    assert_eq!(after.admin, before.admin);
+    assert_eq!(after.platform_wallet, before.platform_wallet);
+    assert_eq!(after.usdc_token, before.usdc_token);
+
+    // A valid update after rejection proves configuration remains usable.
+    cfg.config.set_fee_bps(&250);
+    assert_eq!(cfg.config.get_config().fee_bps, 250);
 }

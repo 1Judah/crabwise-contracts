@@ -230,7 +230,9 @@ pub fn accept_and_rotate(
 /// Withdraw an in-flight proposal without completing it; the active admin is
 /// left untouched.
 ///
-/// The contract wrapper checks the caller against its stored admin first.
+/// Cancelling removes the pending successor, so the former proposal cannot be
+/// accepted later. The contract wrapper checks the caller against its stored
+/// admin first.
 pub fn cancel(env: &Env, admin: &Address) -> Result<(), AdminError> {
     if !env.storage().instance().has(&AdminKey::PendingAdmin) {
         return Err(AdminError::NoPendingTransfer);
@@ -314,6 +316,22 @@ mod tests {
             on(&env, &contract_id, || cancel(&env, &admin)),
             Err(AdminError::NoPendingTransfer)
         );
+    #[test]
+    fn cancelled_proposal_cannot_be_accepted_later() {
+        let (env, admin) = funded_env();
+        let contract_id = env.register_contract(None, crate::TestContract);
+        let successor = Address::generate(&env);
+
+        on(&env, &contract_id, || propose(&env, &admin, &successor).unwrap());
+        on(&env, &contract_id, || cancel(&env, &admin).unwrap());
+
+        // Former proposal must not be accepted after cancellation.
+        assert_eq!(
+            on(&env, &contract_id, || accept(&env, &admin, &successor)),
+            Err(AdminError::NoPendingTransfer)
+        );
+        assert_eq!(on(&env, &contract_id, || pending_admin(&env)), None);
+    }
     }
 
     #[test]
