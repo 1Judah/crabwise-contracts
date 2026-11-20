@@ -57,7 +57,39 @@ fn tier_fee(tiers: &Vec<FeeTier>, volume: i128) -> Option<u32> {
     matched
 }
 
+/// Splits the platform `fee` between the platform and a referrer.
+///
+/// Rounding is deterministic: `referral_fee` is floored (`fee * bps / 10_000`)
+/// and `platform_fee` receives the remainder (`fee - referral_fee`). This
+/// guarantees conservation: `platform_fee + referral_fee == fee`.
+pub fn split_referral_fee(
+    fee: i128,
+    referral: Option<&ReferralConfig>,
+) -> Result<(i128, i128), FeeComputationError> {
+    match referral {
+        Some(cfg) if cfg.bps > 0 => {
+            let referral_fee = fee
+                .checked_mul(cfg.bps as i128)
+                .map(|v| v / 10_000)
+                .ok_or(FeeComputationError::ArithmeticOverflow)?;
+            let platform_fee = fee
+                .checked_sub(referral_fee)
+                .ok_or(FeeComputationError::ArithmeticOverflow)?;
+            Ok((platform_fee, referral_fee))
+        }
+        _ => Ok((fee, 0)),
+    }
+}
+
 /// Full fee computation, mirrored by the `compute_fees` contract entry point.
+///
+/// Rounding is deterministic and conserves the input amount:
+/// - `fee` is floored (`amount * effective_fee_bps / 10_000`); any remainder
+///   stays in `payout` (`amount - fee`).
+/// - When a referrer applies, `referral_fee` is floored from `fee` and
+///   `platform_fee` receives the remainder of that split.
+/// Therefore `payout + platform_fee + referral_fee == amount` and
+/// `platform_fee + referral_fee == fee`.
 #[allow(clippy::too_many_arguments)]
 pub fn compute(
     base_fee_bps: u32,
@@ -73,8 +105,15 @@ pub fn compute(
     if amount < 0 {
         return Err(FeeComputationError::ArithmeticOverflow);
     }
-    let effective_fee_bps =
-        resolve_effective_fee_bps(base_fee_bps, tiers, promotion, volume, current_ledger, min_fee_bps, max_fee_bps);
+    let effective_fee_bps = resolve_effective_fee_bps(
+        base_fee_bps,
+        tiers,
+        promotion,
+        volume,
+        current_ledger,
+        min_fee_bps,
+        max_fee_bps,
+    );
     let fee = amount
         .checked_mul(effective_fee_bps as i128)
         .map(|v| v / 10_000)
@@ -82,19 +121,7 @@ pub fn compute(
     let payout = amount
         .checked_sub(fee)
         .ok_or(FeeComputationError::ArithmeticOverflow)?;
-    let (platform_fee, referral_fee) = match referral {
-        Some(cfg) if cfg.bps > 0 => {
-            let rf = fee
-                .checked_mul(cfg.bps as i128)
-                .map(|v| v / 10_000)
-                .ok_or(FeeComputationError::ArithmeticOverflow)?;
-            let pf = fee
-                .checked_sub(rf)
-                .ok_or(FeeComputationError::ArithmeticOverflow)?;
-            (pf, rf)
-        }
-        _ => (fee, 0),
-    };
+    let (platform_fee, referral_fee) = split_referral_fee(fee, referral)?;
     Ok(FeeBreakdown {
         effective_fee_bps,
         amount,

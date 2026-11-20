@@ -33,17 +33,21 @@ where
 
 // ── Typed wrappers ───────────────────────────────────────────────────────────
 
+/// Maximum valid fee in basis points (100%).
+pub const MAX_FEE_BPS: u32 = 10_000;
+
 /// Attempt to read the platform fee in basis points from `config_contract`.
 ///
-/// Returns `Ok(fee_bps)` on success.  On failure, emits a
-/// `config_lookup_failed` event with `topic = "get_fee_b"` and returns
-/// `Err(())` so the caller can decide whether to use a fallback.
+/// Returns `Ok(fee_bps)` on success.  On failure, or when the returned value
+/// is malformed/out of bounds, emits a `config_lookup_failed` event with
+/// `topic = "get_fee_b"` and returns `Err(())` so the caller can decide
+/// whether to use a fallback.
 ///
 /// Closes #590.
 pub fn try_get_fee_bps(env: &Env, config_contract: &Address) -> Result<u32, ()> {
     match try_call(env, config_contract, &symbol_short!("get_fee_b")) {
-        Some(v) => Ok(v),
-        None => {
+        Some(v) if v <= MAX_FEE_BPS => Ok(v),
+        _ => {
             emit_config_lookup_failed(env, config_contract, "get_fee_b");
             Err(())
         }
