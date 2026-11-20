@@ -1,7 +1,7 @@
 use crate::types::{AddressEnvironment, FeeTier, Promotion, ReferralConfig, ResolutionCacheEntry};
 use crate::PlatformConfigContractClient;
-use soroban_sdk::testutils::{Address as _, Ledger};
-use soroban_sdk::{symbol_short, Address, Env, Symbol};
+use soroban_sdk::testutils::{Address as _, Events as _, Ledger};
+use soroban_sdk::{symbol_short, Address, Env, FromVal, Symbol};
 
 fn setup(
     env: &Env,
@@ -87,8 +87,7 @@ fn test_accept_admin_updates_admin() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #1)")]
-fn test_initialize_already_initialized() {
+fn test_initialize_rejects_repeated_attempt_without_side_effects() {
     let env = Env::default();
     env.mock_all_auths();
     let contract_id = env.register_contract(None, crate::PlatformConfigContract);
@@ -97,7 +96,38 @@ fn test_initialize_already_initialized() {
     let wallet = Address::generate(&env);
     let token = Address::generate(&env);
     client.initialize(&admin, &500, &wallet, &token);
-    client.initialize(&admin, &500, &wallet, &token);
+
+    let init_event_count = || {
+        env.events()
+            .all()
+            .iter()
+            .filter(|(_, topics, _)| {
+                Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("init")
+            })
+            .count()
+    };
+    assert_eq!(init_event_count(), 1);
+
+    let replacement_admin = Address::generate(&env);
+    let replacement_wallet = Address::generate(&env);
+    let replacement_token = Address::generate(&env);
+    let result = client.try_initialize(
+        &replacement_admin,
+        &900,
+        &replacement_wallet,
+        &replacement_token,
+    );
+    assert_eq!(
+        result.err().unwrap().unwrap(),
+        crate::ConfigError::AlreadyInitialized
+    );
+
+    let config = client.get_config();
+    assert_eq!(config.admin, admin);
+    assert_eq!(config.fee_bps, 500);
+    assert_eq!(config.platform_wallet, wallet);
+    assert_eq!(config.usdc_token, token);
+    assert_eq!(init_event_count(), 1);
 }
 
 #[test]
