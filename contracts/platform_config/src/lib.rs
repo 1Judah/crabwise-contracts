@@ -44,6 +44,7 @@ impl PlatformConfigContract {
         set_fee_bps_val(&env, fee_bps);
         set_platform_wallet(&env, &platform_wallet);
         set_usdc_token(&env, &usdc_token);
+        Self::invalidate_config_cache(&env);
         env.events()
             .publish((symbol_short!("init"),), (admin.clone(), fee_bps));
         Ok(())
@@ -77,7 +78,13 @@ impl PlatformConfigContract {
 
     /// Drops the cached config so the next `get_config` call rebuilds it
     /// from current storage. Called by every setter that changes a field
-    /// `get_config` assembles.
+    /// `get_config` assembles:
+    /// - `admin`: `accept_admin` (`transfer_admin` only records a pending admin)
+    /// - `fee_bps`: `set_fee_bps`
+    /// - `platform_wallet`: `set_platform_wallet`
+    /// - `usdc_token`: `initialize` (no other setter exists)
+    ///
+    /// Any new setter for one of these fields must call this too.
     fn invalidate_config_cache(env: &Env) {
         env.storage().instance().remove(&symbol_short!("cfgcache"));
     }
